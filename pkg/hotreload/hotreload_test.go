@@ -14,8 +14,6 @@ import (
 const cmdPath = "github.com/huckridgesw/hot-reload/cmd/hot-reload"
 
 var (
-	// Define the file.  Things to include: exported and unexported function
-	// and method.  Struct with exported & unexported field.
 	testFile = `
 package dummy
 
@@ -91,6 +89,34 @@ func (r T4) t5m1() int {
 	return 0
 }
 `
+
+	// Parse this and print it out to figure out what to generate for the
+	// rewritten f1.
+	targetFile = `
+package target
+
+func YY_f1() int {
+	return YYf_f1()
+}
+
+var YYf_f1 = func() int {
+	v1 = V2
+	v3 = V4
+	v8.t3f1 = V9.T3f2
+	var v11 t3
+	if v1 == V2 {
+		v11 = v1
+	}
+	if v1 == V2 {
+		v11 = v8.t3f1
+	}
+	return 0
+}
+
+func Set_f1(f func() int) {
+	YYf_f1 = f
+}
+`
 )
 
 func init() {
@@ -117,8 +143,7 @@ func TestCompileParse(t *testing.T) {
 					So(err, ShouldBeNil)
 					So(newNode, ShouldNotBeNil)
 
-					// Verify the rewrite
-					Convey("t1 should map to YY_t1", func() {
+					Convey("Types, variables, functions, and function bodies should translate correctly", func() {
 						types := getTypes(newNode)
 						So(types, ShouldContainKey, "YY_t1")
 						So(types, ShouldContainKey, "T2")
@@ -165,11 +190,13 @@ func TestCompileParse(t *testing.T) {
 
 						funcs := getFuncs(newNode)
 						So(funcs, ShouldContainKey, "YY_f1")
+						So(funcs["YY_f1"].Body.List[0], ShouldHaveSameTypeAs, &ast.ReturnStmt{})
 						So(funcs, ShouldContainKey, "F2")
 						So(funcs, ShouldContainKey, "YY_t3m1")
 						So(funcs, ShouldContainKey, "T4m1")
 						So(funcs, ShouldContainKey, "YY_t5m1")
 
+						// General diagnostics.
 						fset := token.NewFileSet()
 						var buf bytes.Buffer
 						err = format.Node(&buf, fset, newNode)
@@ -178,22 +205,11 @@ func TestCompileParse(t *testing.T) {
 
 						ast.Print(fset, newNode)
 
-						// t1 => YY_t1
-						// t3 => YY_t3
-						// t3.t3f1 => YY_t3f1
-						// T4.t4f1 => YY_t4f1
-						// # t5 is an interface
-						// t5 => YY_t5
-						// t5m1 => YY_t5m1
-						//   question: What to do with random methods in other packages called t5m1?
-						//   answer: Nothing.  If they're in other packages and
-						//     they're unexported, they don't matter to us.
-						// v1 => YY_v1
-						// v3 t1 => YY_v3 YY_t1
-						// V4 t1 => V4 YY_t1
-						// v5 => YY_v5
-						// f1 => YY_f1
-						// t3.t3m1 => YY_t3.YY_t3m1
+						// What should the rewritten YY_f1 look like, ast-wise?
+						targetNode, err := Parse("target", targetFile)
+						So(err, ShouldBeNil)
+						So(targetNode, ShouldNotBeNil)
+						ast.Print(fset, targetNode)
 					})
 				})
 			})
@@ -202,13 +218,13 @@ func TestCompileParse(t *testing.T) {
 }
 
 func TestFirstCompile(t *testing.T) {
-	// Define the file.  Include everything from TestCompileParse.
+	// Define the file.
 	// Run the Go compiler with the source filter
 	// Verify the output
 }
 
 func TestReloadParse(t *testing.T) {
-	// Define the file.  Include everything from TestCompileParse.
+	// Define the file.
 	// Do the initial parse
 	// Verify the "real" function runs when called
 	// Change a function
@@ -260,8 +276,8 @@ func getVars(node ast.Node) map[string]ast.Expr {
 	return vars
 }
 
-func getFuncs(node ast.Node) map[string]*ast.FuncType {
-	funcs := map[string]*ast.FuncType{}
+func getFuncs(node ast.Node) map[string]*ast.FuncDecl {
+	funcs := map[string]*ast.FuncDecl{}
 
 	depth := 0
 	f := func(n ast.Node) bool {
@@ -273,7 +289,7 @@ func getFuncs(node ast.Node) map[string]*ast.FuncType {
 		depth++
 		switch n := n.(type) {
 		case *ast.FuncDecl:
-			funcs[n.Name.Name] = n.Type
+			funcs[n.Name.Name] = n
 		}
 
 		return true

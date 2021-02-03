@@ -58,7 +58,12 @@ func Rewrite(node ast.Node) ast.Node {
 				yyExport(knownObjects, &method.Names[0].Name, method.Names[0].Obj)
 			}
 		case *ast.FuncDecl:
+			origName := n.Name.Name
 			yyExport(knownObjects, &n.Name.Name, n.Name.Obj)
+			newBody, newVar, setFunc := rewriteFunc(origName, n)
+			n.Body = newBody
+			c.InsertAfter(setFunc)
+			c.InsertAfter(newVar)
 		}
 		return true
 	}
@@ -97,4 +102,79 @@ func yyExport(knownObjects map[*ast.Object]string, name *string, o *ast.Object) 
 			// o.Name = "YY_" + o.Name
 		}
 	}
+}
+
+func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl, *ast.FuncDecl) {
+	body := &ast.BlockStmt{
+		List: []ast.Stmt{
+			&ast.ReturnStmt{
+				Results: []ast.Expr{
+					&ast.CallExpr{
+						Fun: &ast.Ident{
+							Name: "YYf_" + name,
+							// args??
+						},
+					},
+				},
+			},
+		},
+	}
+
+	newVar := &ast.GenDecl{
+		Tok: token.VAR,
+		Specs: []ast.Spec{
+			&ast.ValueSpec{
+				Names: []*ast.Ident{
+					{
+						Name: "YYf_" + name,
+					},
+				},
+				Values: []ast.Expr{
+					&ast.FuncLit{
+						Type: node.Type,
+						Body: node.Body,
+					},
+				},
+			},
+		},
+	}
+
+	setFunc := &ast.FuncDecl{
+		Name: &ast.Ident{
+			Name: "YYSet_" + name,
+		},
+		Type: &ast.FuncType{
+			Params: &ast.FieldList{
+				List: []*ast.Field{
+					{
+						Names: []*ast.Ident{
+							{
+								Name: "f",
+							},
+						},
+						Type: node.Type,
+					},
+				},
+			},
+		},
+		Body: &ast.BlockStmt{
+			List: []ast.Stmt{
+				&ast.AssignStmt{
+					Lhs: []ast.Expr{
+						&ast.Ident{
+							Name: "YYf_" + name,
+						},
+					},
+					Tok: token.ASSIGN,
+					Rhs: []ast.Expr{
+						&ast.Ident{
+							Name: "f",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return body, newVar, setFunc
 }
