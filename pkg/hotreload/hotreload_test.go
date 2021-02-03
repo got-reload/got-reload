@@ -2,10 +2,14 @@ package hotreload
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"go/ast"
 	"go/format"
 	"go/token"
+	"io/ioutil"
+	"os"
+	"os/exec"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -218,8 +222,41 @@ func TestCompileParse(t *testing.T) {
 }
 
 func TestFirstCompile(t *testing.T) {
+	const data = `package first
+
+    func f1() int {
+        return 9
+    }`
+
+	// TODO: can't use this method because I haven't published this code yet.
+	// Go get can't find the executable.
+	// Ensure we have the binary for the source filter
+	// cmd := exec.CommandContext(context.Background(), "go", "get", cmdPath)
+	// cmd.Stderr = os.Stderr
+	// cmd.Stdout = os.Stdout
+	// if err := cmd.Run(); err != nil {
+	// 	t.Fatalf("Failed to get source filter binary: %v", err)
+	// }
 	// Define the file.
+	file, err := ioutil.TempFile("", "hotreload-*.go")
+	if err != nil {
+		t.Fatalf("Failed to create temporary source code file: %v", err)
+	}
+	fileName := file.Name()
+	t.Logf("Using temporary file %s", fileName)
+	if _, err := file.Write([]byte(data)); err != nil {
+		t.Fatalf("Failed writing into temporary file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Failed closing temporary file: %v", err)
+	}
 	// Run the Go compiler with the source filter
+	cmd := exec.CommandContext(context.Background(), "go", "build", "-toolexec", "hot-reload", fileName)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to get source filter binary: %v", err)
+	}
 	// Verify the output
 }
 
