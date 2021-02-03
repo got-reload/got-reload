@@ -14,6 +14,7 @@ func Parse(fileName string, src interface{}) (ast.Node, error) {
 	return parser.ParseFile(fset, fileName, src, parser.ParseComments)
 }
 
+// TODO: Ignore "main.main()" and all "init()".
 func Rewrite(node ast.Node) ast.Node {
 	knownObjects := map[*ast.Object]string{}
 
@@ -60,6 +61,11 @@ func Rewrite(node ast.Node) ast.Node {
 		case *ast.FuncDecl:
 			origName := n.Name.Name
 			yyExport(knownObjects, &n.Name.Name, n.Name.Obj)
+
+			// Inserted nodes are skipped during traversal, but we can do this
+			// here anyway because the later bit where we find all references to
+			// known objects is in a different Apply call, which won't care that
+			// they were inserted.
 			newBody, newVar, setFunc := rewriteFunc(origName, n)
 			n.Body = newBody
 			c.InsertAfter(setFunc)
@@ -105,6 +111,40 @@ func yyExport(knownObjects map[*ast.Object]string, name *string, o *ast.Object) 
 }
 
 func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl, *ast.FuncDecl) {
+	newVarType := copyFuncType(node.Type)
+
+	var newArgs []ast.Expr
+
+	// Process the receiver for a method definition
+	if node.Recv != nil {
+		receiverName := node.Recv.List[0].Names[0].Name
+
+		// Add receiver name to the front of the function call arglist
+		newArgs = append(newArgs, &ast.Ident{Name: receiverName})
+
+		// prepend the receiver & type to the new function type
+		newVarType.Params.List = append(
+			[]*ast.Field{
+				{
+					Names: []*ast.Ident{
+						{
+							Name: receiverName,
+						},
+					},
+					Type: node.Recv.List[0].Type,
+				},
+			},
+			newVarType.Params.List...)
+	}
+
+	// Copy all formal arguments into the arglist of the function call
+	for _, argField := range node.Type.Params.List {
+		for _, argName := range argField.Names {
+			newArgs = append(newArgs, &ast.Ident{Name: argName.Name})
+		}
+	}
+
+	// Define the new body of the function/method to just call the stub.
 	body := &ast.BlockStmt{
 		List: []ast.Stmt{
 			&ast.ReturnStmt{
@@ -112,14 +152,16 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 					&ast.CallExpr{
 						Fun: &ast.Ident{
 							Name: "YYf_" + name,
-							// args??
 						},
+						Args: newArgs,
 					},
 				},
 			},
 		},
 	}
 
+	// Define the stub with the new arglist, and old body from the
+	// function/method.
 	newVar := &ast.GenDecl{
 		Tok: token.VAR,
 		Specs: []ast.Spec{
@@ -131,7 +173,7 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 				},
 				Values: []ast.Expr{
 					&ast.FuncLit{
-						Type: node.Type,
+						Type: newVarType,
 						Body: node.Body,
 					},
 				},
@@ -139,6 +181,7 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 		},
 	}
 
+	// Define the Set function
 	setFunc := &ast.FuncDecl{
 		Name: &ast.Ident{
 			Name: "YYSet_" + name,
@@ -152,7 +195,7 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 								Name: "f",
 							},
 						},
-						Type: node.Type,
+						Type: newVarType,
 					},
 				},
 			},
@@ -177,4 +220,21 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 	}
 
 	return body, newVar, setFunc
+}
+
+func copyFuncType(t *ast.FuncType) *ast.FuncType {
+	t2 := *t
+	params := *(t.Params)
+	t2.Params = &params
+	t2.Params.List = make([]*ast.Field, len(t.Params.List))
+	for i, field := range t.Params.List {
+		nField := *field
+		nField.Names = make([]*ast.Ident, len(field.Names))
+		for i, ident := range field.Names {
+			nIdent := *ident
+			nField.Names[i] = &nIdent
+		}
+		t2.Params.List[i] = &nField
+	}
+	return &t2
 }

@@ -19,7 +19,12 @@ const cmdPath = "github.com/huckridgesw/hot-reload/cmd/hot-reload"
 
 var (
 	testFile = `
-package dummy
+package main
+
+import (
+	"bytes"
+	"errors"
+)
 
 type (
 	t1 int
@@ -54,34 +59,38 @@ var (
 	V4  t1
 	v5  T2
 	V5  T2
-	v6  other_package.T1
-	V7  other_package.T2
+	v6  bytes.Buffer
+	V7  bytes.Reader
 	v8  t3
 	V9  t3
 	V10 uint32
 )
 
-func f1() int {
+func f1(a1 int, a2, a3 t1, a4 T2) (int, t1, error) {
 	v1 = V2
 	v3 = V4
 	v8.t3f1 = V9.T3f2
 	var v11 t3
 	if v1 == V2 {
-		v11 = v1
+		v11.t3f1 = v1
 	}
 	if v1 == V2 {
-		v11 = v8.t3f1
+		v11.T3f2 = v8.t3f1
 	}
-	return 0
+	return v1, v3, errors.New("an error")
 }
 
-func F2() t1 {
-	return t1{}
+func F2() (ret_named t1) {
+	var v12 t1
+	return v12
 }
 
-func (r t3) t3m1() int {
-	r.t3f1 = r.T2f2
-	return 0
+func (r t3) t3m1(a5 t5) (ret2_named int) {
+	a5.t5m1()
+	a5.T5m2(t3{})
+	r.t3f1 = r.T3f2
+	ret2_named = 0
+	return
 }
 
 func (r T4) T4m1() int {
@@ -92,6 +101,8 @@ func (r T4) T4m1() int {
 func (r T4) t5m1() int {
 	return 0
 }
+
+func main() {}
 `
 
 	// Parse this and print it out to figure out what to generate for the
@@ -99,11 +110,11 @@ func (r T4) t5m1() int {
 	targetFile = `
 package target
 
-func YY_f1() int {
-	return YYf_f1()
+func YY_f1(a1 int, a2, a3 YY_t1, a4 T2) (int, YY_t1, error) {
+	return YYf_f1(a1, a2, a3, a4)
 }
 
-var YYf_f1 = func() int {
+var YYf_f1 = func(a1 int, a2, a3 YY_t1, a4 T2) (int, YY_t1, error) {
 	v1 = V2
 	v3 = V4
 	v8.t3f1 = V9.T3f2
@@ -114,10 +125,10 @@ var YYf_f1 = func() int {
 	if v1 == V2 {
 		v11 = v8.t3f1
 	}
-	return 0
+	return v1, v3, errors.New("an error")
 }
 
-func Set_f1(f func() int) {
+func Set_f1(f func(a1 int, a2, a3 YY_t1, a4 T2) (int, YY_t1, error)) {
 	YYf_f1 = f
 }
 `
