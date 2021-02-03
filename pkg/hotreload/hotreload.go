@@ -9,7 +9,7 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 )
 
-func Parse(fileName, src string) (ast.Node, error) {
+func Parse(fileName string, src interface{}) (ast.Node, error) {
 	fset := token.NewFileSet()
 	return parser.ParseFile(fset, fileName, src, parser.ParseComments)
 }
