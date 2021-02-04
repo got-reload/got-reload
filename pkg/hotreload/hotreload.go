@@ -11,10 +11,9 @@ import (
 
 func Parse(fileName string, src interface{}) (ast.Node, error) {
 	fset := token.NewFileSet()
-	return parser.ParseFile(fset, fileName, src, parser.ParseComments)
+	return parser.ParseFile(fset, fileName, src, 0)
 }
 
-// TODO: Ignore "main.main()" and all "init()".
 func Rewrite(node ast.Node) ast.Node {
 	knownObjects := map[*ast.Object]string{}
 
@@ -22,10 +21,14 @@ func Rewrite(node ast.Node) ast.Node {
 	// parse tree, is kind of a guess.
 	depth := 0
 
+	var pkg string
+
 	// Scan all type definitions and variable declarations
 	pre := func(c *astutil.Cursor) bool {
 		depth++
 		switch n := c.Node().(type) {
+		case *ast.File:
+			pkg = n.Name.Name
 		case *ast.TypeSpec:
 			yyExport(knownObjects, &n.Name.Name, n.Name.Obj)
 		case *ast.StructType:
@@ -60,6 +63,10 @@ func Rewrite(node ast.Node) ast.Node {
 			}
 		case *ast.FuncDecl:
 			origName := n.Name.Name
+			if origName == "init" ||
+				(pkg == "main" && origName == "main") {
+				return false
+			}
 			yyExport(knownObjects, &n.Name.Name, n.Name.Obj)
 
 			// Inserted nodes are skipped during traversal, but we can do this
@@ -145,19 +152,33 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 	}
 
 	// Define the new body of the function/method to just call the stub.
-	body := &ast.BlockStmt{
-		List: []ast.Stmt{
-			&ast.ReturnStmt{
-				Results: []ast.Expr{
-					&ast.CallExpr{
-						Fun: &ast.Ident{
-							Name: "YYf_" + name,
-						},
-						Args: newArgs,
+	stubCall := &ast.CallExpr{
+		Fun: &ast.Ident{
+			Name: "YYf_" + name,
+		},
+		Args: newArgs,
+	}
+	var body *ast.BlockStmt
+	if node.Type.Results == nil {
+		// If the function has no return type, then just call the stub.
+		body = &ast.BlockStmt{
+			List: []ast.Stmt{
+				&ast.ExprStmt{
+					X: stubCall,
+				},
+			},
+		}
+	} else {
+		// Add a "return" statement to the stub call.
+		body = &ast.BlockStmt{
+			List: []ast.Stmt{
+				&ast.ReturnStmt{
+					Results: []ast.Expr{
+						stubCall,
 					},
 				},
 			},
-		},
+		}
 	}
 
 	// Define the stub with the new arglist, and old body from the
