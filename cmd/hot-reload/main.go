@@ -43,9 +43,9 @@ func main() {
 	}
 
 	log.Printf("Args: %v", os.Args)
-	nodes, err := hotreload.Parse("", string(source))
+	nodes, err := hotreload.Parse(targetFileName, string(source))
 	if err != nil {
-		log.Printf("Failed parsing: %v", err)
+		log.Printf("Failed parsing %s: %v", targetFileName, err)
 		os.Exit(int(FailedParse))
 	}
 	nodes = hotreload.Rewrite(nodes)

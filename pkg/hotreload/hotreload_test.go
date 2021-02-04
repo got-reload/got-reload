@@ -1,12 +1,9 @@
 package hotreload
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"go/ast"
 	"go/format"
-	"go/token"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -98,15 +95,14 @@ func (r T4) T4m1() int {
 	return 0
 }
 
-func (r T4) t5m1() int {
-	return 0
+func (r T4) t5m1() {
 }
 
 func main() {}
 `
 
 	// Parse this and print it out to figure out what to generate for the
-	// rewritten f1.
+	// rewritten functions.
 	targetFile = `
 package target
 
@@ -145,7 +141,7 @@ func init() {
 func TestCompileParse(t *testing.T) {
 	Convey("Given a testfile", t, func() {
 		// Parse it
-		node, err := Parse("dummy", testFile)
+		node, err := Parse("/tmp/main", testFile)
 
 		Convey("It should parse correctly", func() {
 			So(err, ShouldBeNil)
@@ -212,19 +208,18 @@ func TestCompileParse(t *testing.T) {
 						So(funcs, ShouldContainKey, "YY_t5m1")
 
 						// General diagnostics.
-						fset := token.NewFileSet()
-						var buf bytes.Buffer
-						err = format.Node(&buf, fset, newNode)
-						So(err, ShouldBeNil)
-						fmt.Printf("%s", buf.String())
+						// fset := token.NewFileSet()
+						// var buf bytes.Buffer
+						// err = format.Node(&buf, fset, newNode)
+						// So(err, ShouldBeNil)
+						// fmt.Printf("%s", buf.String())
+						// ast.Print(fset, newNode)
 
-						ast.Print(fset, newNode)
-
-						// What should the rewritten YY_f1 look like, ast-wise?
-						targetNode, err := Parse("target", targetFile)
-						So(err, ShouldBeNil)
-						So(targetNode, ShouldNotBeNil)
-						ast.Print(fset, targetNode)
+						// // What should the rewritten YY_f1 look like, ast-wise?
+						// targetNode, err := Parse("target", targetFile)
+						// So(err, ShouldBeNil)
+						// So(targetNode, ShouldNotBeNil)
+						// ast.Print(fset, targetNode)
 					})
 				})
 			})
@@ -232,7 +227,7 @@ func TestCompileParse(t *testing.T) {
 	})
 }
 
-func TestFirstCompile(t *testing.T) {
+func _TestFirstCompile(t *testing.T) {
 	const data = `package first
 
     func f1() int {
