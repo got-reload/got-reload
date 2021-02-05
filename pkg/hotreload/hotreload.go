@@ -1,20 +1,17 @@
 package hotreload
 
 import (
+	"fmt"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"go/types"
 
 	"golang.org/x/tools/go/ast/astutil"
 )
 
-func Parse(fileName string, src interface{}) (ast.Node, error) {
-	fset := token.NewFileSet()
-	return parser.ParseFile(fset, fileName, src, 0)
-}
-
 func Rewrite(node ast.Node) ast.Node {
+	// This (obviously) only "knows" things we've seen in this file, and even
+	// then, only if they have a valid Obj pointer, which not everything does.
 	knownObjects := map[*ast.Object]string{}
 
 	// This depth thing, both how it's calculated, and its meaning within a
@@ -24,6 +21,8 @@ func Rewrite(node ast.Node) ast.Node {
 	var pkg string
 
 	// Scan all type definitions and variable declarations
+	//
+	// TODO: structs with embedded types with no names might be a problem?
 	pre := func(c *astutil.Cursor) bool {
 		depth++
 		switch n := c.Node().(type) {
@@ -73,8 +72,7 @@ func Rewrite(node ast.Node) ast.Node {
 			// here anyway because the later bit where we find all references to
 			// known objects is in a different Apply call, which won't care that
 			// they were inserted.
-			newBody, newVar, setFunc := rewriteFunc(origName, n)
-			n.Body = newBody
+			newVar, setFunc := rewriteFunc(origName, n)
 			c.InsertAfter(setFunc)
 			c.InsertAfter(newVar)
 		}
@@ -90,13 +88,19 @@ func Rewrite(node ast.Node) ast.Node {
 	pre = func(c *astutil.Cursor) bool {
 		switch n := c.Node().(type) {
 		case *ast.Ident:
-			if newName, ok := knownObjects[n.Obj]; ok {
+			if n.Obj == nil {
+				// if o := types.Universe.Lookup(n.Name); o == nil {
+				// 	// This is also a bit of a guess.
+				// 	yyExport(knownObjects, &n.Name, nil)
+				// }
+			} else if newName, ok := knownObjects[n.Obj]; ok {
 				n.Name = newName
 			}
-		// FIXME: This is a bit of a guess.  I guess?  The *compiler* could
-		// probably figure out what the type of n.X is.  (X is the bit before
-		// the dot in the expression `someVar.someField` or `someVar.someMethod`
-		// or `some[0].complicated().expression.someField`).  Not sure that the
+		// FIXME: This is a bit of a guess.  And probably wrong.  The *compiler*
+		// could probably figure out what the type of n.X is.  (X is the bit
+		// before the dot in the expression `someVar.someField` or
+		// `someVar.someMethod` or
+		// `some[0].complicated().expression.someField`).  Not sure that the
 		// *parser* can, with the information it has at its disposal.  Maybe?
 		case *ast.SelectorExpr:
 			yyExport(knownObjects, &n.Sel.Name, nil)
@@ -117,14 +121,29 @@ func yyExport(knownObjects map[*ast.Object]string, name *string, o *ast.Object) 
 	}
 }
 
-func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl, *ast.FuncDecl) {
+// Updates node in place, and returns newVar and setFunc
+func rewriteFunc(name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncDecl) {
 	newVarType := copyFuncType(node.Type)
 
 	var newArgs []ast.Expr
 
+	n := 0
+	recvrVarOffset := 0
+
 	// Process the receiver for a method definition
 	if node.Recv != nil {
-		receiverName := node.Recv.List[0].Names[0].Name
+		// Note that we have a receiver
+		recvrVarOffset++
+
+		var receiverName string
+		if len(node.Recv.List[0].Names) == 0 {
+			// If the function has no receiver name, we have to generate one.
+			receiverName = fmt.Sprintf("YYarg_%d", n)
+			n++
+			node.Recv.List[0].Names = []*ast.Ident{{Name: receiverName}}
+		} else {
+			receiverName = node.Recv.List[0].Names[0].Name
+		}
 
 		// Add receiver name to the front of the function call arglist
 		newArgs = append(newArgs, &ast.Ident{Name: receiverName})
@@ -142,12 +161,31 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 				},
 			},
 			newVarType.Params.List...)
+
+		// Prepend the receiver type to the stub name.
+		switch t := node.Recv.List[0].Type.(type) {
+		case *ast.Ident:
+			name = t.Name + "_" + name
+		case *ast.StarExpr:
+			name = t.X.(*ast.Ident).Name + "_" + name
+		}
 	}
 
 	// Copy all formal arguments into the arglist of the function call
-	for _, argField := range node.Type.Params.List {
-		for _, argName := range argField.Names {
-			newArgs = append(newArgs, &ast.Ident{Name: argName.Name})
+	for i, argField := range node.Type.Params.List {
+		if len(argField.Names) == 0 {
+			newName := fmt.Sprintf("YYarg_%d", n)
+			n++
+			newIdent := &ast.Ident{Name: newName}
+			argField.Names = []*ast.Ident{newIdent}
+			newArgs = append(newArgs, newIdent)
+
+			// Update newVarType too
+			newVarType.Params.List[recvrVarOffset+i].Names = argField.Names
+		} else {
+			for _, argName := range argField.Names {
+				newArgs = append(newArgs, &ast.Ident{Name: argName.Name})
+			}
 		}
 	}
 
@@ -240,7 +278,9 @@ func rewriteFunc(name string, node *ast.FuncDecl) (*ast.BlockStmt, *ast.GenDecl,
 		},
 	}
 
-	return body, newVar, setFunc
+	// Replace the node's body with the new body in-place.
+	node.Body = body
+	return newVar, setFunc
 }
 
 func copyFuncType(t *ast.FuncType) *ast.FuncType {

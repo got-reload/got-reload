@@ -1,9 +1,12 @@
 package hotreload
 
 import (
+	"bytes"
 	"context"
 	"go/ast"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -21,6 +24,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	. "fmt"
 )
 
 type (
@@ -47,6 +51,10 @@ type (
 		T6f2() int
 	}
 	uint32 int
+	T7 struct {
+		t3
+		T4
+	}
 )
 
 var (
@@ -61,6 +69,7 @@ var (
 	v8  t3
 	V9  t3
 	V10 uint32
+	v13, V14, v15 t3
 )
 
 func f1(a1 int, a2, a3 t1, a4 T2) (int, t1, error) {
@@ -82,7 +91,7 @@ func F2() (ret_named t1) {
 	return v12
 }
 
-func (r t3) t3m1(a5 t5) (ret2_named int) {
+func (r *t3) t3m1(a5 t5) (ret2_named int) {
 	a5.t5m1()
 	a5.T5m2(t3{})
 	r.t3f1 = r.T3f2
@@ -96,6 +105,16 @@ func (r T4) T4m1() int {
 }
 
 func (r T4) t5m1() {
+}
+
+// Named receiver with unnamed arg
+func (r T4) t4m2(int) int {
+	return 0
+}
+
+// Unnamed receiver with used arg
+func (T4) t4m3(a6 int) int {
+	return 0
 }
 
 func main() {}
@@ -141,7 +160,9 @@ func init() {
 func TestCompileParse(t *testing.T) {
 	Convey("Given a testfile", t, func() {
 		// Parse it
-		node, err := Parse("/tmp/main", testFile)
+		fset := token.NewFileSet()
+		node, err := parser.ParseFile(fset, "/tmp/main", testFile, 0)
+		So(err, ShouldBeNil)
 
 		Convey("It should parse correctly", func() {
 			So(err, ShouldBeNil)
@@ -155,6 +176,8 @@ func TestCompileParse(t *testing.T) {
 					So(newNode, ShouldNotBeNil)
 
 					Convey("Types, variables, functions, and function bodies should translate correctly", func() {
+						// check that . import
+
 						types := getTypes(newNode)
 						So(types, ShouldContainKey, "YY_t1")
 						So(types, ShouldContainKey, "T2")
@@ -207,19 +230,22 @@ func TestCompileParse(t *testing.T) {
 						So(funcs, ShouldContainKey, "T4m1")
 						So(funcs, ShouldContainKey, "YY_t5m1")
 
-						// General diagnostics.
-						// fset := token.NewFileSet()
-						// var buf bytes.Buffer
-						// err = format.Node(&buf, fset, newNode)
-						// So(err, ShouldBeNil)
-						// fmt.Printf("%s", buf.String())
-						// ast.Print(fset, newNode)
+						if false {
+							// General diagnostics.
+							fset := token.NewFileSet()
+							var buf bytes.Buffer
+							err = format.Node(&buf, fset, newNode)
+							So(err, ShouldBeNil)
+							ast.Fprint(&buf, fset, newNode, ast.NotNilFilter)
+							t.Logf("%s", buf.String())
 
-						// // What should the rewritten YY_f1 look like, ast-wise?
-						// targetNode, err := Parse("target", targetFile)
-						// So(err, ShouldBeNil)
-						// So(targetNode, ShouldNotBeNil)
-						// ast.Print(fset, targetNode)
+							// What should the rewritten YY_f1 look like, ast-wise?
+							fset = token.NewFileSet()
+							targetNode, err := parser.ParseFile(fset, "target", targetFile, 0)
+							So(err, ShouldBeNil)
+							So(targetNode, ShouldNotBeNil)
+							ast.Print(fset, targetNode)
+						}
 					})
 				})
 			})
