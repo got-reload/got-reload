@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -72,14 +73,27 @@ const argListDelimiter = "--"
 func runAsSubprocess(command []string) error {
 	cmd, args := command[0], command[1:]
 	subprocess := exec.Command(cmd, args...)
+	versionCheck := contains("-V=full", args)
 	// must hook up I/O streams so that the stdout of the compiler
 	// can return its tool id as per this:
 	// https://github.com/golang/go/blob/953d1feca9b21af075ad5fc8a3dad096d3ccc3a0/src/cmd/go/internal/work/buildid.go#L119
 	subprocess.Stderr = os.Stderr
 	subprocess.Stdout = os.Stdout
 	subprocess.Stdin = os.Stdin
+	var b bytes.Buffer
+	if versionCheck {
+		subprocess.Stdout = &b
+	}
 	log.Printf("Running command: %v", command)
-	return subprocess.Run()
+	err := subprocess.Run()
+	if versionCheck {
+		parts := strings.Fields(b.String())
+		parts[len(parts)-1] = parts[len(parts)-1] + "-hot"
+		result := strings.Join(parts, " ")
+		fmt.Fprintln(os.Stdout, result)
+		log.Printf("Emitting version %s", result)
+	}
+	return err
 }
 
 func main() {
@@ -130,7 +144,7 @@ func main() {
 	packageName := intendedCommand[packageNameIndex]
 	if !contains(packageName, strings.Split(packages, ",")) {
 		// we are not rewriting this package
-		log.Println("Not target package, compiling normally")
+		log.Printf("Not target package (package=%s, targets=%v), compiling normally", packageName, packages)
 		finishAsNormal()
 	}
 
