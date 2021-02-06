@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
@@ -30,53 +31,85 @@ const (
 
 var Usage string = `%[1]s:
 
-%[1]s [flags] -- <go compiler invocation>
+%[1]s [flags] %[2]s <go compiler invocation>
 
 This tool expects to be invoked by the go build toolchain. You can
 insert it like so:
 
-go build -toolexec '%[1]s --' .
+go build -toolexec '%[1]s %[2]s' .
 
-You *must* provide the "--" to denote the boundary between flags to
+You *must* provide the "%[2]s" to denote the boundary between flags to
 %[1]s and the following go compiler invocation.
 
+Flags:
 `
 
-func main() {
-	log.SetFlags(log.Lshortfile)
-	log.Println("initial args:", os.Args)
+func indexOf(target string, input []string) int {
 	boundary := -1
-	for i := range os.Args {
-		if os.Args[i] == "--" {
+	for i, element := range input {
+		if element == target {
 			boundary = i
 			break
 		}
 	}
-	if boundary < 0 {
-		log.Fatal("Must provide -- in args")
+	return boundary
+}
+
+func splitAt(target string, input []string) ([]string, []string) {
+	boundary := indexOf(target, input)
+	if boundary == -1 || boundary == len(input) {
+		return input, nil
 	}
-	intendedCommand := os.Args[boundary+1:]
-	os.Args = os.Args[:boundary]
+	return input[:boundary], input[boundary+1:]
+}
+
+func contains(target string, input []string) bool {
+	return indexOf(target, input) != -1
+}
+
+const argListDelimiter = "--"
+
+func runAsSubprocess(command []string) error {
+	cmd, args := command[0], command[1:]
+	subprocess := exec.Command(cmd, args...)
+	// must hook up I/O streams so that the stdout of the compiler
+	// can return its tool id as per this:
+	// https://github.com/golang/go/blob/953d1feca9b21af075ad5fc8a3dad096d3ccc3a0/src/cmd/go/internal/work/buildid.go#L119
+	subprocess.Stderr = os.Stderr
+	subprocess.Stdout = os.Stdout
+	subprocess.Stdin = os.Stdin
+	log.Printf("Running command: %v", command)
+	return subprocess.Run()
+}
+
+func main() {
+	log.SetFlags(log.Lshortfile)
 	var packages string
 	flag.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
-	flag.StringVar(&packages, "p", "", "The comma-delimited list of packages to enable for hot reload")
+	flag.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), Usage, os.Args[0], argListDelimiter)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 	if len(packages) < 1 {
 		log.Fatal("No packages specified")
 	}
 
+	boundary := indexOf(argListDelimiter, os.Args)
+	if boundary < 0 {
+		log.Fatalf("Must provide %s in args", argListDelimiter)
+	}
+
+	var intendedCommand []string
+	os.Args, intendedCommand = splitAt(argListDelimiter, os.Args)
+
 	finishAsNormal := func() {
-		cmd, args := intendedCommand[0], intendedCommand[1:]
-		subprocess := exec.Command(cmd, args...)
-		// must hook up I/O streams so that the stdout of the compiler
-		// can return its tool id as per this:
-		// https://github.com/golang/go/blob/953d1feca9b21af075ad5fc8a3dad096d3ccc3a0/src/cmd/go/internal/work/buildid.go#L119
-		subprocess.Stderr = os.Stderr
-		subprocess.Stdout = os.Stdout
-		subprocess.Stdin = os.Stdin
-		log.Printf("running cmd: %v %v", cmd, args)
-		if err := subprocess.Run(); err != nil {
-			log.Fatal("Subcommand failed:", err)
+		if err := runAsSubprocess(intendedCommand); err != nil {
+			exitError := new(exec.ExitError)
+			if errors.As(err, &exitError) {
+				os.Exit(exitError.ExitCode())
+			}
 		}
 		os.Exit(int(Success))
 	}
@@ -87,27 +120,15 @@ func main() {
 		finishAsNormal()
 	}
 
-	packageNameIndex := -1
-	for i := range intendedCommand {
-		if intendedCommand[i] == "-p" {
-			packageNameIndex = i + 1
-			break
-		}
-	}
+	packageNameIndex := indexOf("-p", intendedCommand) + 1
 	if packageNameIndex < 0 {
 		// no package name in arguments, do not rewrite
 		log.Println("No package name found in compiler cmdline")
 		finishAsNormal()
 	}
+
 	packageName := intendedCommand[packageNameIndex]
-	found := false
-	for _, pkg := range strings.Split(packages, ",") {
-		if pkg == packageName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !contains(packageName, strings.Split(packages, ",")) {
 		// we are not rewriting this package
 		log.Println("Not target package, compiling normally")
 		finishAsNormal()
