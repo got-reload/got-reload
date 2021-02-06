@@ -43,6 +43,7 @@ You *must* provide the "--" to denote the boundary between flags to
 `
 
 func main() {
+	log.SetFlags(log.Lshortfile)
 	log.Println("initial args:", os.Args)
 	boundary := -1
 	for i := range os.Args {
@@ -66,14 +67,22 @@ func main() {
 
 	finishAsNormal := func() {
 		cmd, args := intendedCommand[0], intendedCommand[1:]
+		subprocess := exec.Command(cmd, args...)
+		// must hook up I/O streams so that the stdout of the compiler
+		// can return its tool id as per this:
+		// https://github.com/golang/go/blob/953d1feca9b21af075ad5fc8a3dad096d3ccc3a0/src/cmd/go/internal/work/buildid.go#L119
+		subprocess.Stderr = os.Stderr
+		subprocess.Stdout = os.Stdout
+		subprocess.Stdin = os.Stdin
 		log.Printf("running cmd: %v %v", cmd, args)
-		if err := exec.Command(cmd, args...).Run(); err != nil {
+		if err := subprocess.Run(); err != nil {
 			log.Fatal("Subcommand failed:", err)
 		}
 		os.Exit(int(Success))
 	}
 
 	if !strings.HasSuffix(intendedCommand[0], "compile") {
+		log.Println("Not compiling")
 		// we are not compiling, no rewriting to do
 		finishAsNormal()
 	}
@@ -87,6 +96,7 @@ func main() {
 	}
 	if packageNameIndex < 0 {
 		// no package name in arguments, do not rewrite
+		log.Println("No package name found in compiler cmdline")
 		finishAsNormal()
 	}
 	packageName := intendedCommand[packageNameIndex]
@@ -99,6 +109,7 @@ func main() {
 	}
 	if !found {
 		// we are not rewriting this package
+		log.Println("Not target package, compiling normally")
 		finishAsNormal()
 	}
 
@@ -144,7 +155,7 @@ func rewrite(targetFileName string) (outputFileName string, err error) {
 	}
 	nodes = hotreload.Rewrite(nodes)
 
-	outputFile, err := ioutil.TempFile("", "hotreloadable-*-"+targetFileName)
+	outputFile, err := ioutil.TempFile("", "hotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
 		return "", fmt.Errorf("failed opening dest file: %w", err)
 	}
