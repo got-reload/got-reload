@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -70,7 +71,7 @@ func contains(target string, input []string) bool {
 
 const argListDelimiter = "--"
 
-func runAsSubprocess(command []string) error {
+func runAsSubprocess(version string, command []string) error {
 	cmd, args := command[0], command[1:]
 	subprocess := exec.Command(cmd, args...)
 	versionCheck := contains("-V=full", args)
@@ -88,7 +89,7 @@ func runAsSubprocess(command []string) error {
 	err := subprocess.Run()
 	if versionCheck {
 		parts := strings.Fields(b.String())
-		parts[len(parts)-1] = parts[len(parts)-1] + "-hot"
+		parts[len(parts)-1] = parts[len(parts)-1] + version
 		result := strings.Join(parts, " ")
 		fmt.Fprintln(os.Stdout, result)
 		log.Printf("Emitting version %s", result)
@@ -96,16 +97,29 @@ func runAsSubprocess(command []string) error {
 	return err
 }
 
-func main() {
-	log.SetFlags(log.Lshortfile)
+const (
+	subcommandToolexec = "toolexec"
+	subcommandRun      = "run"
+)
+
+var subcommands = map[string]func(selfName string, args []string){
+	subcommandToolexec: toolexec,
+	subcommandRun:      run,
+}
+
+func toolexec(selfName string, args []string) {
 	var packages string
-	flag.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
-	flag.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), Usage, os.Args[0], argListDelimiter)
-		flag.PrintDefaults()
+	set := flag.NewFlagSet(selfName, flag.ExitOnError)
+	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
+	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
+	set.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), Usage, selfName, argListDelimiter)
+		set.PrintDefaults()
 	}
-	flag.Parse()
+	if err := set.Parse(args); err != nil {
+		set.Usage()
+		os.Exit(1)
+	}
 	if len(packages) < 1 {
 		log.Fatal("No packages specified")
 	}
@@ -116,10 +130,12 @@ func main() {
 	}
 
 	var intendedCommand []string
-	os.Args, intendedCommand = splitAt(argListDelimiter, os.Args)
+	args, intendedCommand = splitAt(argListDelimiter, args)
 
 	finishAsNormal := func() {
-		if err := runAsSubprocess(intendedCommand); err != nil {
+		// use the list of hot packages as a version to ensure that we recompile packages each
+		// time we change the list of hot-reloadable packages.
+		if err := runAsSubprocess(packages, intendedCommand); err != nil {
 			exitError := new(exec.ExitError)
 			if errors.As(err, &exitError) {
 				os.Exit(exitError.ExitCode())
@@ -129,7 +145,7 @@ func main() {
 	}
 
 	if !strings.HasSuffix(intendedCommand[0], "compile") {
-		log.Println("Not compiling")
+		//log.Println("Not compiling")
 		// we are not compiling, no rewriting to do
 		finishAsNormal()
 	}
@@ -172,6 +188,76 @@ func main() {
 
 	log.Printf("Final cmdline: %v", intendedCommand)
 	finishAsNormal()
+}
+
+func run(selfName string, args []string) {
+	var packages string
+	set := flag.NewFlagSet(selfName, flag.ExitOnError)
+	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
+	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
+	set.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
+
+%[1]s [flags] <package> [<package> ...]
+
+Flags:
+
+`, selfName)
+		set.PrintDefaults()
+	}
+	if err := set.Parse(args); err != nil {
+		set.Usage()
+		os.Exit(1)
+	}
+	runPackage := set.Arg(0)
+
+	packageList := strings.Split(packages, ",")
+	if len(packageList) < 1 {
+		log.Fatal("No hot-reload packages specified")
+	}
+
+	absExecutable, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		log.Fatalf("Unable to find hotreload helper program: %v", err)
+	}
+
+	toolexecValue := absExecutable + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
+	cmd := exec.CommandContext(context.TODO(), "go", "run", "-toolexec", toolexecValue, runPackage)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+}
+
+func main() {
+	log.SetFlags(log.Lshortfile)
+	executable := filepath.Base(os.Args[0])
+	flag.Usage = func() {
+		var subcommandList []string
+		for cmd := range subcommands {
+			subcommandList = append(subcommandList, cmd)
+		}
+		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s:
+
+%[1]s <subcommand> [flags]
+
+Where subcommand is one of: %v
+
+`, executable, subcommandList)
+		flag.PrintDefaults()
+	}
+	if len(os.Args) < 2 {
+		flag.Usage()
+		os.Exit(1)
+	}
+	subcommand := os.Args[1]
+	os.Args = append([]string{executable}, os.Args[2:]...)
+	if cmd, ok := subcommands[subcommand]; !ok {
+		flag.Usage()
+		log.Fatalf("Unrecognized subcommand: %s", subcommand)
+	} else {
+		cmd(executable+" "+subcommand, os.Args[1:])
+	}
 }
 
 func rewrite(targetFileName string) (outputFileName string, err error) {
