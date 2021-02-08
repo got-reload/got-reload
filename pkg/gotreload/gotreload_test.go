@@ -175,6 +175,14 @@ var GRLf_f1 = func(a1 int, a2, a3 GRL_t1, a4 T2) (int, GRL_t1, error) {
 func GRLset_f1(f func(a1 int, a2, a3 GRL_t1, a4 T2) (int, GRL_t1, error)) {
 	GRLf_f1 = f
 }
+
+func Register(pkgName, ident string, val reflect.Value) {}
+
+var pkgName, ident string
+var val reflect.Value
+func init() { 
+	rewriter.Register("pkg_name_literal", "ident_literal", reflect.ValueOf(GRLset_f1)) 
+}
 `
 )
 
@@ -193,7 +201,7 @@ func TestCompileParse(t *testing.T) {
 		// t.Logf("Getwd: %s, %v", cwd, err)
 
 		// Parse it
-		r := &Reload{
+		r := &Rewriter{
 			Config: packages.Config{
 				// Logf: t.Logf,
 				// This is handy for knowing what is being parsed and by what name.
@@ -231,18 +239,23 @@ func TestCompileParse(t *testing.T) {
 							if false {
 								// General diagnostics.
 								var buf bytes.Buffer
+
+								// Formatted output file
 								err = format.Node(&buf, pkg.Fset, file)
 								So(err, ShouldBeNil)
-								ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
 								Printf("%s", buf.String())
+								// // File AST
+								// buf = bytes.Buffer{}
+								// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
+								// Printf("%s", buf.String())
 
 								// What should the rewritten f1 look like, ast-wise?
-								// targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
-								// So(err, ShouldBeNil)
-								// So(targetNode, ShouldNotBeNil)
-								// buf = bytes.Buffer{}
-								// ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
-								// Printf("%s", buf.String())
+								targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
+								So(err, ShouldBeNil)
+								So(targetNode, ShouldNotBeNil)
+								buf = bytes.Buffer{}
+								ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
+								Printf("%s", buf.String())
 							}
 						}()
 
