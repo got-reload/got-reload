@@ -6,10 +6,12 @@ import (
 	"os"
 
 	"github.com/huckridgesw/got-reload/demo/example"
-	_ "github.com/huckridgesw/got-reload/pkg/reloader"
+	"github.com/huckridgesw/got-reload/pkg/reloader"
 )
 
 func main() {
+	reloader.Start()
+
 	fmt.Printf("Press enter to call example.F1 repeatedly\n")
 	fmt.Printf("Enter s to stop\n")
 	scanner := bufio.NewScanner(os.Stdin)
@@ -17,6 +19,7 @@ func main() {
 		if scanner.Text() == "s" {
 			break
 		}
-		fmt.Printf("Example.F1: %d\n", example.F1())
+		fmt.Printf("example.F1: %d\n", example.F1())
+		fmt.Printf("example.F2: %d\n", example.F2())
 	}
 }
