@@ -1,4 +1,4 @@
-package hotreload
+package gotreload
 
 import (
 	"context"

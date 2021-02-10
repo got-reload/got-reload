@@ -1,4 +1,4 @@
-module github.com/huckridgesw/hot-reload
+module github.com/huckridgesw/got-reload
 
 go 1.14
 

@@ -15,7 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/huckridgesw/hot-reload/pkg/hotreload"
+	"github.com/huckridgesw/got-reload/pkg/gotreload"
 )
 
 type ExitCode int
@@ -218,7 +218,7 @@ Flags:
 
 	absExecutable, err := filepath.Abs(os.Args[0])
 	if err != nil {
-		log.Fatalf("Unable to find hotreload helper program: %v", err)
+		log.Fatalf("Unable to find gotreload helper program: %v", err)
 	}
 
 	toolexecValue := absExecutable + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
@@ -270,13 +270,13 @@ func rewrite(targetFileName string) (outputFileName string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("failed reading source file: %w", err)
 	}
-	nodes, err := hotreload.Parse(targetFileName, string(source))
+	nodes, err := gotreload.Parse(targetFileName, string(source))
 	if err != nil {
 		return "", fmt.Errorf("failed parsing %s: %w", targetFileName, err)
 	}
-	nodes = hotreload.Rewrite(nodes)
+	nodes = gotreload.Rewrite(nodes)
 
-	outputFile, err := ioutil.TempFile("", "hotreloadable-*-"+filepath.Base(targetFileName))
+	outputFile, err := ioutil.TempFile("", "gotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
 		return "", fmt.Errorf("failed opening dest file: %w", err)
 	}
