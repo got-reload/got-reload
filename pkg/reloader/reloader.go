@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/huckridgesw/got-reload/pkg/gotreload"
 )
 
 const PackageListEnv = "GOT_RELOAD_PKGS"
@@ -57,6 +58,13 @@ func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 }
 
 func StartWatching() <-chan string {
+	list := os.Getenv(PackageListEnv)
+	r := &gotreload.Rewriter{}
+	err := r.Load(list)
+	if err != nil {
+		log.Fatalf("Error parsing packages: %v", err)
+	}
+
 	log.Println(WatchedPkgs, PkgsToDirs, DirsToPkgs)
 	out := make(chan string)
 	watcher, err := fsnotify.NewWatcher()
@@ -74,7 +82,9 @@ func StartWatching() <-chan string {
 		for event := range watcher.Events {
 			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) > 0 {
 				abs, _ := filepath.Abs(event.Name)
-				out <- abs
+				if _, _, err := r.LookupFile(abs); err == nil {
+					out <- abs
+				}
 			}
 		}
 	}()
