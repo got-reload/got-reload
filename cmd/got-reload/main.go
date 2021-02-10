@@ -234,7 +234,13 @@ Flags:
 
 	os.Setenv(reloader.PackageListEnv, packages)
 
-	toolexecValue := os.Args[0] + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
+	absExecutable, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		log.Printf("Unable to derive absolute path for %s, using relative path and hoping for the best: %v", os.Args[0], err)
+		absExecutable = os.Args[0]
+	}
+
+	toolexecValue := absExecutable + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
 	cmd := exec.CommandContext(context.TODO(), "go", "run", "-toolexec", toolexecValue, runPackage)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
