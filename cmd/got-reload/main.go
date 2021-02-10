@@ -175,15 +175,19 @@ func toolexec(selfName string, args []string) {
 		}
 	}
 
+	log.Printf("Parsing package %s", packageName)
 	r := &gotreload.Rewriter{}
 	err := r.Load(packageName)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	err = r.Rewrite()
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
 
 	log.Printf("Looping through gofiles: %#v", gofiles)
 	for file := range gofiles {
-		log.Printf("calling rewrite on %s", file)
 		newName, err := rewrite(r, file)
 		if err != nil {
 			log.Fatalf("Failed rewriting file %s: %v", file, err)
@@ -278,7 +282,7 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 		return "", err
 	}
 
-	log.Printf("Writing filtered version of %s", targetFileName)
+	// log.Printf("Writing filtered version of %s", targetFileName)
 	b := bytes.Buffer{}
 	err = format.Node(&b, fset, fileNode)
 	if err != nil {
