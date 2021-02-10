@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"go/format"
-	"go/token"
 	"io/ioutil"
 	"log"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/huckridgesw/got-reload/pkg/gotreload"
+	"github.com/huckridgesw/got-reload/pkg/reloader"
 )
 
 type ExitCode int
@@ -71,7 +71,7 @@ func contains(target string, input []string) bool {
 
 const argListDelimiter = "--"
 
-func runAsSubprocess(version string, command []string) error {
+func runAsSubprocess(version string, command []string, logIt bool) error {
 	cmd, args := command[0], command[1:]
 	subprocess := exec.Command(cmd, args...)
 	versionCheck := contains("-V=full", args)
@@ -85,11 +85,13 @@ func runAsSubprocess(version string, command []string) error {
 	if versionCheck {
 		subprocess.Stdout = &b
 	}
-	log.Printf("Running command: %v", command)
+	if logIt {
+		log.Printf("Running command: %v", command)
+	}
 	err := subprocess.Run()
 	if versionCheck {
 		parts := strings.Fields(b.String())
-		parts[len(parts)-1] = parts[len(parts)-1] + version
+		// parts[len(parts)-1] = parts[len(parts)-1] + version
 		result := strings.Join(parts, " ")
 		fmt.Fprintln(os.Stdout, result)
 		log.Printf("Emitting version %s", result)
@@ -124,6 +126,8 @@ func toolexec(selfName string, args []string) {
 		log.Fatal("No packages specified")
 	}
 
+	log.Printf("toolexec called with: %v", args)
+
 	boundary := indexOf(argListDelimiter, os.Args)
 	if boundary < 0 {
 		log.Fatalf("Must provide %s in args", argListDelimiter)
@@ -132,10 +136,10 @@ func toolexec(selfName string, args []string) {
 	var intendedCommand []string
 	args, intendedCommand = splitAt(argListDelimiter, args)
 
-	finishAsNormal := func() {
+	finishAsNormal := func(logIt bool) {
 		// use the list of hot packages as a version to ensure that we recompile packages each
 		// time we change the list of hot-reloadable packages.
-		if err := runAsSubprocess(packages, intendedCommand); err != nil {
+		if err := runAsSubprocess(packages, intendedCommand, logIt); err != nil {
 			exitError := new(exec.ExitError)
 			if errors.As(err, &exitError) {
 				os.Exit(exitError.ExitCode())
@@ -147,21 +151,21 @@ func toolexec(selfName string, args []string) {
 	if !strings.HasSuffix(intendedCommand[0], "compile") {
 		//log.Println("Not compiling")
 		// we are not compiling, no rewriting to do
-		finishAsNormal()
+		finishAsNormal(false)
 	}
 
 	packageNameIndex := indexOf("-p", intendedCommand) + 1
 	if packageNameIndex < 0 {
 		// no package name in arguments, do not rewrite
 		log.Println("No package name found in compiler cmdline")
-		finishAsNormal()
+		finishAsNormal(false)
 	}
 
 	packageName := intendedCommand[packageNameIndex]
 	if !contains(packageName, strings.Split(packages, ",")) {
 		// we are not rewriting this package
 		log.Printf("Not target package (package=%s, targets=%v), compiling normally", packageName, packages)
-		finishAsNormal()
+		finishAsNormal(false)
 	}
 
 	gofiles := map[string]string{}
@@ -171,8 +175,16 @@ func toolexec(selfName string, args []string) {
 		}
 	}
 
+	r := &gotreload.Rewriter{}
+	err := r.Load(packageName)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	log.Printf("Looping through gofiles: %#v", gofiles)
 	for file := range gofiles {
-		newName, err := rewrite(file)
+		log.Printf("calling rewrite on %s", file)
+		newName, err := rewrite(r, file)
 		if err != nil {
 			log.Fatalf("Failed rewriting file %s: %v", file, err)
 		}
@@ -187,7 +199,7 @@ func toolexec(selfName string, args []string) {
 	}
 
 	log.Printf("Final cmdline: %v", intendedCommand)
-	finishAsNormal()
+	finishAsNormal(true)
 }
 
 func run(selfName string, args []string) {
@@ -216,12 +228,9 @@ Flags:
 		log.Fatal("No hot-reload packages specified")
 	}
 
-	absExecutable, err := filepath.Abs(os.Args[0])
-	if err != nil {
-		log.Fatalf("Unable to find gotreload helper program: %v", err)
-	}
+	os.Setenv(reloader.PackageListEnv, packages)
 
-	toolexecValue := absExecutable + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
+	toolexecValue := os.Args[0] + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
 	cmd := exec.CommandContext(context.TODO(), "go", "run", "-toolexec", toolexecValue, runPackage)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -260,21 +269,22 @@ Where subcommand is one of: %v
 	}
 }
 
-func rewrite(targetFileName string) (outputFileName string, err error) {
-	targetFile, err := os.Open(targetFileName)
+func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName string, err error) {
+	log.Printf("rewrite %s", targetFileName)
+
+	var source []byte
+	fileNode, fset, err := r.LookupFile(targetFileName)
 	if err != nil {
-		return "", fmt.Errorf("failed opening source file: %w", err)
+		return "", err
 	}
-	defer targetFile.Close()
-	source, err := ioutil.ReadAll(targetFile)
+
+	log.Printf("Writing filtered version of %s", targetFileName)
+	b := bytes.Buffer{}
+	err = format.Node(&b, fset, fileNode)
 	if err != nil {
-		return "", fmt.Errorf("failed reading source file: %w", err)
+		return "", fmt.Errorf("Failed writing filtered version of %s", targetFileName)
 	}
-	nodes, err := gotreload.Parse(targetFileName, string(source))
-	if err != nil {
-		return "", fmt.Errorf("failed parsing %s: %w", targetFileName, err)
-	}
-	nodes = gotreload.Rewrite(nodes)
+	source = b.Bytes()
 
 	outputFile, err := ioutil.TempFile("", "gotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
@@ -289,8 +299,7 @@ func rewrite(targetFileName string) (outputFileName string, err error) {
 			}
 		}
 	}()
-	if err := format.Node(outputFile, token.NewFileSet(), nodes); err != nil {
-		return "", fmt.Errorf("failed formatting results: %w", err)
-	}
+
+	ioutil.WriteFile(outputFileName, source, 0600)
 	return
 }
