@@ -234,7 +234,7 @@ Flags:
 
 	os.Setenv(reloader.PackageListEnv, packages)
 
-	absExecutable, err := filepath.Abs(os.Args[0])
+	absExecutable, err := os.Executable()
 	if err == nil {
 		_, err := os.Stat(absExecutable)
 		if err != nil {
