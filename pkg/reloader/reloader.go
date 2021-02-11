@@ -71,7 +71,7 @@ func StartWatching(list string) <-chan string {
 	if err != nil {
 		log.Fatalf("Error parsing packages: %v", err)
 	}
-	err = r.Rewrite()
+	err = r.Rewrite(true)
 	if err != nil {
 		log.Fatalf("Error rewriting packages: %s: %v", list, err)
 	}
@@ -132,7 +132,7 @@ func Start() {
 					if err != nil {
 						log.Fatalf("Error parsing package containing file %s: %v", change, err)
 					}
-					err = newR.Rewrite()
+					err = newR.Rewrite(true)
 					if err != nil {
 						log.Fatalf("Error rewriting package for %s: %v", change, err)
 					}
@@ -179,7 +179,7 @@ func Start() {
 
 								i := interp.New(interp.Options{})
 								i.Use(stdlib.Symbols)
-								i.Use(interp.Symbols)
+								// i.Use(interp.Symbols)
 								// yaegi.Use(giopkgs.Symbols)
 								i.Use(gotreload.RegisteredSymbols)
 								imports := []string{}

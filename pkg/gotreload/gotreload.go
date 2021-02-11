@@ -34,10 +34,12 @@ type (
 	Rewriter struct {
 		Config packages.Config
 		Pkgs   []*packages.Package
-		// Keys are PkgPath & setter name
+		// Keys are PkgPath & setter name.  We use PkgPath as the key instead of
+		// a *packages.Package because we need to be able to find this across
+		// different instances of Rewriter, where pointer values will be
+		// different, but package import paths, which are just strings, will be
+		// the same.
 		NewFunc map[string]map[string]*ast.FuncLit
-
-		pkgPaths []string // a list of packages (import paths)
 	}
 
 	Interpreter interface {
@@ -53,10 +55,9 @@ func (r *Rewriter) Load(paths ...string) error {
 		packages.NeedTypes |
 		packages.NeedSyntax |
 		packages.NeedTypesInfo
-	r.pkgPaths = paths
 	r.NewFunc = map[string]map[string]*ast.FuncLit{}
 
-	pkgs, err := packages.Load(&r.Config, r.pkgPaths...)
+	pkgs, err := packages.Load(&r.Config, paths...)
 	if err != nil {
 		return err
 	}
@@ -77,19 +78,20 @@ func (r *Rewriter) Reload(root string, pkgPath []string, interp Interpreter) err
 }
 
 // Rewrite rewrites the ASTs in r.Pkgs in place.
-func (r *Rewriter) Rewrite() error {
+func (r *Rewriter) Rewrite(addPackage bool) error {
 	for _, pkg := range r.Pkgs {
 		if pkg.TypesInfo == nil {
 			log.Printf("Pkg %s: No TypesInfo\n", pkg.Name)
 			continue
 		}
-		r.rewritePkg(pkg)
+		r.rewritePkg(pkg, addPackage)
 	}
 	return nil
 }
 
-func (r *Rewriter) rewritePkg(pkg *packages.Package) {
+func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) {
 	exported := map[types.Object]bool{}
+	definedInThisPackage := map[types.Object]bool{}
 	funcs := map[*ast.FuncDecl]string{}
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
@@ -120,17 +122,69 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) {
 		if obj, ok := obj.(*types.Func); ok {
 			tagForTranslation(pkg, funcs, obj)
 		}
+		definedInThisPackage[obj] = true
 	}
 
 	r.stubTopLevelFuncs(pkg, funcs)
 
 	// Find all the uses of all the stuff we exported, and export them
-	// too.
+	// too.  If addPackage, tag idents defined in this package for adding the
+	// package to.
+	addPackageIdent := map[*ast.Ident]bool{}
 	for ident, obj := range pkg.TypesInfo.Uses {
 		if exported[obj] {
 			ident.Name = exportPrefix + ident.Name
 		}
+		if addPackage && definedInThisPackage[obj] {
+			log.Printf("Add package to %s", ident.Name)
+			addPackageIdent[ident] = true
+		}
 	}
+
+	if addPackage {
+		// Add a package prefix to all identifiers defined in this package
+		// (noted above).
+		for _, file := range pkg.Syntax {
+			pre := func(c *astutil.Cursor) bool {
+				switch n := c.Node().(type) {
+				case *ast.Ident:
+					if !addPackageIdent[n] {
+						return true
+					}
+					log.Printf("Adding package to %s", n.Name)
+					c.Replace(newSelector(pkg.Name, n.Name))
+				}
+				return true
+			}
+			_ = astutil.Apply(file, pre, nil)
+		}
+	}
+
+	// In the first file in the package, register all identifiers declared in
+	// this package.  (Probably need some "&" operators?)
+	var statements []ast.Stmt
+	for obj := range definedInThisPackage {
+		statements = append(statements,
+			&ast.ExprStmt{
+				X: &ast.CallExpr{
+					Fun: newSelector(thisPackageName, "Register"),
+					Args: []ast.Expr{
+						newStringLit(pkg.PkgPath),
+						newStringLit(obj.Name()),
+						&ast.CallExpr{
+							Fun:  newSelector("reflect", "ValueOf"),
+							Args: []ast.Expr{newIdent(obj.Name())},
+						}}}})
+	}
+
+	file := pkg.Syntax[0]
+	file.Decls = append(file.Decls,
+		&ast.FuncDecl{
+			Name: newIdent("init"),
+			Type: &ast.FuncType{Params: &ast.FieldList{}},
+			Body: &ast.BlockStmt{
+				List: statements,
+			}})
 }
 
 // assureExported takes unexported identifiers, adds a prefix to export them,

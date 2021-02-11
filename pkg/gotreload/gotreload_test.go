@@ -224,7 +224,7 @@ func TestCompileParse(t *testing.T) {
 			So(r.Pkgs, ShouldNotBeNil)
 
 			Convey("When rewritten", func() {
-				err = r.Rewrite()
+				err = r.Rewrite(false)
 
 				Convey("It should rewrite correctly", func() {
 					So(err, ShouldBeNil)
