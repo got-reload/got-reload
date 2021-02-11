@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"io/ioutil"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/huckridgesw/got-reload/pkg/extract"
 	"github.com/traefik/yaegi/interp"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
@@ -160,31 +162,22 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) {
 		}
 	}
 
-	// In the first file in the package, register all identifiers declared in
-	// this package.  (Probably need some "&" operators?)
-	var statements []ast.Stmt
-	for obj := range definedInThisPackage {
-		statements = append(statements,
-			&ast.ExprStmt{
-				X: &ast.CallExpr{
-					Fun: newSelector(thisPackageName, "Register"),
-					Args: []ast.Expr{
-						newStringLit(pkg.PkgPath),
-						newStringLit(obj.Name()),
-						&ast.CallExpr{
-							Fun:  newSelector("reflect", "ValueOf"),
-							Args: []ast.Expr{newIdent(obj.Name())},
-						}}}})
+	// generate symbol registration
+	trailer, err := extract.GenContent(pkg.PkgPath, pkg.Types)
+	if err != nil {
+		log.Fatalf("Failed generating symbol registration for %s: %v", pkg.PkgPath, err)
+	}
+	log.Println(string(trailer))
+	// parse the generated symbol registration source code into an AST
+	trailerFileAST, err := parser.ParseFile(pkg.Fset, "registration.go", trailer, 0)
+	if err != nil {
+		log.Fatalf("Failed parsing symbol registration for %s: %v", pkg.PkgPath, err)
 	}
 
+	// combine the generated symbol registration source code with the first file in the package
 	file := pkg.Syntax[0]
-	file.Decls = append(file.Decls,
-		&ast.FuncDecl{
-			Name: newIdent("init"),
-			Type: &ast.FuncType{Params: &ast.FieldList{}},
-			Body: &ast.BlockStmt{
-				List: statements,
-			}})
+	file.Decls = append(file.Decls, trailerFileAST.Decls...)
+	file.Imports = append(file.Imports, trailerFileAST.Imports...)
 }
 
 // assureExported takes unexported identifiers, adds a prefix to export them,
@@ -471,6 +464,16 @@ func Register(pkgName, ident string, val reflect.Value) {
 		RegisteredSymbols[pkgName] = map[string]reflect.Value{}
 	}
 	RegisteredSymbols[pkgName][ident] = val
+}
+
+// RegisterAll invokes Register once for each symbol provided in the symbols
+// map.
+func RegisterAll(symbols interp.Exports) {
+	for pkg, pkgSyms := range symbols {
+		for pkgSym, value := range pkgSyms {
+			Register(pkg, pkgSym, value)
+		}
+	}
 }
 
 func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet, error) {
