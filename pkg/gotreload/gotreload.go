@@ -86,12 +86,15 @@ func (r *Rewriter) Rewrite(addPackage bool) error {
 			log.Printf("Pkg %s: No TypesInfo\n", pkg.Name)
 			continue
 		}
-		r.rewritePkg(pkg, addPackage)
+		err := r.rewritePkg(pkg, addPackage)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) {
+func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 	exported := map[types.Object]bool{}
 	definedInThisPackage := map[types.Object]bool{}
 	funcs := map[*ast.FuncDecl]string{}
@@ -112,7 +115,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) {
 				assureExported(exported, ident, obj)
 				tagForTranslation(pkg, funcs, obj)
 			default:
-				log.Printf("Internal error: No parent: %#v\n", obj)
+				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
 			}
 			continue
 		}
@@ -158,16 +161,17 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) {
 				}
 				return true
 			}
-			_ = astutil.Apply(file, pre, nil)
+			file = astutil.Apply(file, pre, nil).(*ast.File)
 		}
 	}
 
 	// generate symbol registration
 	trailer, err := extract.GenContent(pkg.PkgPath, pkg.Types)
 	if err != nil {
-		log.Fatalf("Failed generating symbol registration for %s: %v", pkg.PkgPath, err)
+		return fmt.Errorf("Failed generating symbol registration for %s: %w", pkg.PkgPath, err)
 	}
-	log.Println(string(trailer))
+
+	// log.Printf("Trailer: %s", string(trailer))
 	// parse the generated symbol registration source code into an AST
 	trailerFileAST, err := parser.ParseFile(pkg.Fset, "registration.go", trailer, 0)
 	if err != nil {
@@ -176,8 +180,88 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) {
 
 	// combine the generated symbol registration source code with the first file in the package
 	file := pkg.Syntax[0]
-	file.Decls = append(file.Decls, trailerFileAST.Decls...)
-	file.Imports = append(file.Imports, trailerFileAST.Imports...)
+
+	// log.Printf("current file:")
+	// err = ast.Fprint(os.Stderr, pkg.Fset, file, nil)
+	// if err != nil {
+	// 	return fmt.Errorf("Error formatting current file: %w", err)
+	// }
+
+	// log.Printf("trailer file:")
+	// err = ast.Fprint(os.Stderr, nil, trailerFileAST, nil)
+	// if err != nil {
+	// 	return fmt.Errorf("Error formatting trailer file: %w", err)
+	// }
+
+	if len(file.Decls) == 0 {
+		// I think?  Covers imports and other stuff from the trailer.
+		file.Decls = trailerFileAST.Decls
+	} else {
+		var trailerImports []ast.Spec
+		var importDecl *ast.GenDecl
+
+		// Find the ImportSpec in the trailer, save the imports, and remove the
+		// decl itself.
+		cont := true
+		found := false
+		pre := func(c *astutil.Cursor) bool {
+			switch n := c.Node().(type) {
+			case *ast.GenDecl:
+				if n.Tok == token.IMPORT {
+					found = true
+					importDecl = n
+					trailerImports = n.Specs
+					c.Delete()
+					cont = false
+				}
+				return cont
+			}
+			return cont
+		}
+		trailerFileAST = astutil.Apply(trailerFileAST, pre, nil).(*ast.File)
+
+		// Only try to append the imports if we actually found any.
+		if found {
+			// find the ImportSpec (if any) in the original file and append to it
+			cont = true
+			found := false
+			pre = func(c *astutil.Cursor) bool {
+				switch n := c.Node().(type) {
+				case *ast.GenDecl:
+					if n.Tok == token.IMPORT {
+						found = true
+						n.Specs = append(n.Specs, trailerImports...)
+						cont = false
+					}
+					return cont
+				}
+				return cont
+			}
+			file = astutil.Apply(file, pre, nil).(*ast.File)
+
+			if !found {
+				// Original file *has* no imports to append to.  Create them.
+				file.Decls = append([]ast.Decl{importDecl}, file.Decls...)
+			}
+		}
+
+		// Append the other decls (imports deleted above).
+		file.Decls = append(file.Decls, trailerFileAST.Decls...)
+	}
+
+	// log.Printf("updated file:")
+	// err = ast.Fprint(os.Stderr, pkg.Fset, file, nil)
+	// if err != nil {
+	// 	return fmt.Errorf("Error formatting trailer file: %w", err)
+	// }
+
+	b := bytes.Buffer{}
+	err = format.Node(&b, pkg.Fset, file)
+	if err != nil {
+		return fmt.Errorf("Error formatting updated file: %w", err)
+	}
+	log.Printf("Updated file: %s", b.String())
+	return nil
 }
 
 // assureExported takes unexported identifiers, adds a prefix to export them,

@@ -190,7 +190,7 @@ func toolexec(selfName string, args []string) {
 	for file := range gofiles {
 		newName, err := rewrite(r, file)
 		if err != nil {
-			log.Fatalf("Failed rewriting file %s: %v", file, err)
+			log.Fatalf("Error rewriting file %s: %v", file, err)
 		}
 		gofiles[file] = newName
 	}
@@ -235,7 +235,13 @@ Flags:
 	os.Setenv(reloader.PackageListEnv, packages)
 
 	absExecutable, err := filepath.Abs(os.Args[0])
-	if err != nil {
+	if err == nil {
+		_, err := os.Stat(absExecutable)
+		if err != nil {
+			log.Printf("%s does not exist; searching $PATH for %s and hoping for the best", absExecutable, os.Args[0])
+			absExecutable = os.Args[0]
+		}
+	} else {
 		log.Printf("Unable to derive absolute path for %s, using relative path and hoping for the best: %v", os.Args[0], err)
 		absExecutable = os.Args[0]
 	}
@@ -292,20 +298,20 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 	b := bytes.Buffer{}
 	err = format.Node(&b, fset, fileNode)
 	if err != nil {
-		return "", fmt.Errorf("Failed writing filtered version of %s", targetFileName)
+		return "", fmt.Errorf("Error writing filtered version of %s: %w", targetFileName, err)
 	}
 	source = b.Bytes()
 
 	outputFile, err := ioutil.TempFile("", "gotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
-		return "", fmt.Errorf("failed opening dest file: %w", err)
+		return "", fmt.Errorf("Error opening dest file: %w", err)
 	}
 	outputFileName = outputFile.Name()
 	defer func() {
 		if closeerr := outputFile.Close(); closeerr != nil {
 			if err == nil {
 				// if we didn't fail for another reason, fail for this
-				err = fmt.Errorf("failed closing file: %w", closeerr)
+				err = fmt.Errorf("Error closing file: %w", closeerr)
 			}
 		}
 	}()
