@@ -36,7 +36,6 @@ import (
 	"{{$key}}"
 	{{- end}}
 {{- end}}
-	"{{.PkgName}}"
 	"reflect"
 	"github.com/huckridgesw/got-reload/pkg/gotreload"
 )
