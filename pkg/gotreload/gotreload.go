@@ -324,11 +324,11 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 						return false
 					}
 
-					newVar, setFunc, register := rewriteFunc(pkg.PkgPath, name, n)
+					newVar, setFunc, _ := rewriteFunc(pkg.PkgPath, name, n)
 					// These are like a stack, so in the emitted source, the
 					// current func will come first, then newVar, then setFunc,
 					// then register.
-					c.InsertAfter(register)
+					//					c.InsertAfter(register)
 					c.InsertAfter(setFunc)
 					c.InsertAfter(newVar)
 
