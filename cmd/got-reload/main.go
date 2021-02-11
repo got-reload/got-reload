@@ -181,7 +181,7 @@ func toolexec(selfName string, args []string) {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	err = r.Rewrite()
+	err = r.Rewrite(false)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}

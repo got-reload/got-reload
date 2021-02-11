@@ -1,6 +1,7 @@
 package example
 
 import (
+	"fmt"
 	"reflect"
 
 	"github.com/huckridgesw/got-reload/pkg/gotreload"
@@ -11,6 +12,12 @@ var (
 	_ = gotreload.Register
 )
 
+var (
+	I int
+)
+
 func F1() int {
-	return 1
+	I++
+	fmt.Printf("I: %d\n", I)
+	return 2
 }

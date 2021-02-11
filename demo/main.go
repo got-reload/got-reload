@@ -21,5 +21,6 @@ func main() {
 		}
 		fmt.Printf("example.F1: %d\n", example.F1())
 		fmt.Printf("example.F2: %d\n", example.F2())
+		fmt.Printf("example.I: %d\n", example.I)
 	}
 }
