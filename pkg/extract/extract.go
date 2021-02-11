@@ -41,7 +41,8 @@ import (
 )
 
 func init() {
-	gotreload.RegisterAll(map[string]reflect.Value{
+	gotreload.RegisterAll(map[string]map[string]reflect.Value{
+    	                  "{{.PkgName}}": map[string]reflect.Value{
 		{{- if .Val}}
 		// function, constant and variable definitions
 		{{range $key, $value := .Val -}}
@@ -66,6 +67,7 @@ func init() {
 			"_{{$key}}": reflect.ValueOf((*{{$value.Name}})(nil)),
 		{{end}}
 		{{- end}}
+	},
 	})
 }
 {{range $key, $value := .Wrap -}}
@@ -145,7 +147,7 @@ func GenContent(importPath string, p *types.Package) ([]byte, error) {
 			continue
 		}
 
-		pname := path.Base(importPath) + "." + name
+		pname := name
 		if rname := path.Base(importPath) + name; restricted[rname] {
 			// Restricted symbol, locally provided by stdlib wrapper.
 			pname = rname
