@@ -106,6 +106,7 @@ func StartWatching(list string) <-chan string {
 
 func Start() {
 	log.Printf("Reloader Starting: 11:00")
+	log.Printf("Registered symbols: %v", gotreload.RegisteredSymbols)
 	list := os.Getenv(PackageListEnv)
 	changesCh := StartWatching(list)
 	const dur = 2 * time.Second
