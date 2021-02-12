@@ -29,6 +29,7 @@ const (
 	FailedWrite
 	FailedParse
 	FailedTruncate
+	FailedCleanup
 )
 
 var Usage string = `%[1]s:
@@ -91,7 +92,7 @@ func runAsSubprocess(version string, command []string, logIt bool) error {
 	err := subprocess.Run()
 	if versionCheck {
 		parts := strings.Fields(b.String())
-		// parts[len(parts)-1] = parts[len(parts)-1] + version
+		parts[len(parts)-1] = parts[len(parts)-1] + version
 		result := strings.Join(parts, " ")
 		fmt.Fprintln(os.Stdout, result)
 		log.Printf("Emitting version %s", result)
@@ -126,7 +127,7 @@ func toolexec(selfName string, args []string) {
 		log.Fatal("No packages specified")
 	}
 
-	log.Printf("toolexec called with: %v", args)
+	// log.Printf("toolexec called with: %v", args)
 
 	boundary := indexOf(argListDelimiter, os.Args)
 	if boundary < 0 {
@@ -136,16 +137,28 @@ func toolexec(selfName string, args []string) {
 	var intendedCommand []string
 	args, intendedCommand = splitAt(argListDelimiter, args)
 
+	var toDelete []string
 	finishAsNormal := func(logIt bool) {
-		// use the list of hot packages as a version to ensure that we recompile packages each
-		// time we change the list of hot-reloadable packages.
+		// Use the list of hot packages as a version to ensure that we recompile
+		// packages each time we change the list of hot-reloadable packages.
 		if err := runAsSubprocess(packages, intendedCommand, logIt); err != nil {
 			exitError := new(exec.ExitError)
 			if errors.As(err, &exitError) {
 				os.Exit(exitError.ExitCode())
 			}
 		}
-		os.Exit(int(Success))
+
+		// Clean up all our generated *.go files.
+		exitCode := Success
+		for _, f := range toDelete {
+			err := os.Remove(f)
+			if err != nil {
+				exitCode = FailedCleanup
+				fmt.Fprintf(os.Stderr, "Error removing %s: %v", f, err)
+			}
+		}
+
+		os.Exit(int(exitCode))
 	}
 
 	if !strings.HasSuffix(intendedCommand[0], "compile") {
@@ -164,7 +177,7 @@ func toolexec(selfName string, args []string) {
 	packageName := intendedCommand[packageNameIndex]
 	if !contains(packageName, strings.Split(packages, ",")) {
 		// we are not rewriting this package
-		log.Printf("Not target package (package=%s, targets=%v), compiling normally", packageName, packages)
+		// log.Printf("Not target package (package=%s, targets=%v), compiling normally", packageName, packages)
 		finishAsNormal(false)
 	}
 
@@ -175,7 +188,7 @@ func toolexec(selfName string, args []string) {
 		}
 	}
 
-	log.Printf("Parsing package %s", packageName)
+	// log.Printf("Parsing package %s", packageName)
 	r := &gotreload.Rewriter{}
 	err := r.Load(packageName)
 	if err != nil {
@@ -186,23 +199,37 @@ func toolexec(selfName string, args []string) {
 		log.Fatalf("%v", err)
 	}
 
-	log.Printf("Looping through gofiles: %#v", gofiles)
 	for file := range gofiles {
 		newName, err := rewrite(r, file)
 		if err != nil {
 			log.Fatalf("Error rewriting file %s: %v", file, err)
 		}
+		toDelete = append(toDelete, newName)
 		gofiles[file] = newName
 	}
+	registerFName, err := writeRegister(r)
+	if err != nil {
+		log.Fatalf("Error writing register files: %v", err)
+	}
+	toDelete = append(toDelete, registerFName)
 
-	// substitute rewritten file names
+	// Substitute rewritten file names, and save the position of the last one.
+	var last int
 	for i, arg := range intendedCommand {
 		if filepath.Ext(arg) == ".go" {
 			intendedCommand[i] = gofiles[arg]
+			last = i
 		}
 	}
 
-	log.Printf("Final cmdline: %v", intendedCommand)
+	// Insert our "register" filename after the last go file.
+	intendedCommand = append(intendedCommand, "")
+	if last < len(intendedCommand)-1 {
+		copy(intendedCommand[last+2:], intendedCommand[last+1:])
+	}
+	intendedCommand[last+1] = registerFName
+
+	// log.Printf("Final cmdline: %v", intendedCommand)
 	finishAsNormal(true)
 }
 
@@ -234,6 +261,9 @@ Flags:
 
 	os.Setenv(reloader.PackageListEnv, packages)
 
+	// This is either "got-reload" or whatever executable "go run" builds.  (I
+	// mention this in part because if you search the source for "got-reload" I
+	// feel like you should find it, since we (might) run it here!)
 	absExecutable, err := os.Executable()
 	if err == nil {
 		_, err := os.Stat(absExecutable)
@@ -286,9 +316,8 @@ Where subcommand is one of: %v
 }
 
 func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName string, err error) {
-	log.Printf("rewrite %s", targetFileName)
+	// log.Printf("rewrite %s", targetFileName)
 
-	var source []byte
 	fileNode, fset, err := r.LookupFile(targetFileName)
 	if err != nil {
 		return "", err
@@ -300,13 +329,29 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 	if err != nil {
 		return "", fmt.Errorf("Error writing filtered version of %s: %w", targetFileName, err)
 	}
-	source = b.Bytes()
+	return writeTempFile(b.Bytes(), targetFileName)
+}
 
+// Write the grl_register.go file.
+//
+// Since we only run toolexec on a single package, there will only be a single
+// package to worry about in r.Pkgs.
+func writeRegister(r *gotreload.Rewriter) (outputFileNames string, err error) {
+	pkg := r.Pkgs[0]
+	// log.Printf("write register for %s", pkg.Name)
+	outputFileName, err := writeTempFile(r.Info[pkg].Registrations, "grl_register.go")
+	if err != nil {
+		return "", err
+	}
+	return outputFileName, nil
+}
+
+func writeTempFile(source []byte, targetFileName string) (string, error) {
 	outputFile, err := ioutil.TempFile("", "gotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
 		return "", fmt.Errorf("Error opening dest file: %w", err)
 	}
-	outputFileName = outputFile.Name()
+	outputFileName := outputFile.Name()
 	defer func() {
 		if closeerr := outputFile.Close(); closeerr != nil {
 			if err == nil {
@@ -316,6 +361,9 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 		}
 	}()
 
-	ioutil.WriteFile(outputFileName, source, 0600)
-	return
+	err = ioutil.WriteFile(outputFileName, source, 0600)
+	if err != nil {
+		return "", err
+	}
+	return outputFileName, nil
 }
