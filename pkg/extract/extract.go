@@ -28,7 +28,7 @@ import (
 
 const model = `
 
-package registration
+package {{.PkgName}}
 
 import (
 {{- range $key, $value := .Imports }}
@@ -42,7 +42,7 @@ import (
 
 func init() {
 	gotreload.RegisterAll(map[string]map[string]reflect.Value{
-    	                  "{{.PkgName}}": map[string]reflect.Value{
+    	                  "{{.PkgPath}}": map[string]reflect.Value{
 		{{- if .Val}}
 		// function, constant and variable definitions
 		{{range $key, $value := .Val -}}
@@ -121,7 +121,7 @@ func matchList(name string, list []string) (match bool, err error) {
 	return
 }
 
-func GenContent(importPath string, p *types.Package) ([]byte, error) {
+func GenContent(importPath string, p *types.Package, setFuncs []string) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
 
@@ -206,6 +206,11 @@ func GenContent(importPath string, p *types.Package) ([]byte, error) {
 			}
 		}
 	}
+	// Create a val slot for all the generated setter functions (GRLset_XXX),
+	// just like *types.Func above.
+	for _, name := range setFuncs {
+		val[name] = Val{name, false}
+	}
 
 	// Generate buildTags with Go version only for stdlib packages.
 	// Third party packages do not depend on Go compiler version by default.
@@ -244,7 +249,8 @@ func GenContent(importPath string, p *types.Package) ([]byte, error) {
 	b := new(bytes.Buffer)
 	data := map[string]interface{}{
 		"Imports":   imports,
-		"PkgName":   importPath,
+		"PkgName":   p.Name(),
+		"PkgPath":   importPath,
 		"Val":       val,
 		"Typ":       typ,
 		"Wrap":      wrap,

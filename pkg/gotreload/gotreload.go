@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
-	"go/parser"
 	"go/token"
 	"go/types"
 	"io/ioutil"
 	"log"
+	"path"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/huckridgesw/got-reload/pkg/extract"
 	"github.com/traefik/yaegi/interp"
@@ -42,10 +43,13 @@ type (
 		// different, but package import paths, which are just strings, will be
 		// the same.
 		NewFunc map[string]map[string]*ast.FuncLit
+
+		// Per-package supplemental information.  Used only in initial rewrite.
+		Info map[*packages.Package]*Info
 	}
 
-	Interpreter interface {
-		Eval(src string) (res reflect.Value, err error)
+	Info struct {
+		Registrations []byte
 	}
 )
 
@@ -58,6 +62,7 @@ func (r *Rewriter) Load(paths ...string) error {
 		packages.NeedSyntax |
 		packages.NeedTypesInfo
 	r.NewFunc = map[string]map[string]*ast.FuncLit{}
+	r.Info = map[*packages.Package]*Info{}
 
 	pkgs, err := packages.Load(&r.Config, paths...)
 	if err != nil {
@@ -65,17 +70,6 @@ func (r *Rewriter) Load(paths ...string) error {
 	}
 	r.Pkgs = pkgs
 
-	return nil
-}
-
-// Reload reparses the given packages and uses interp to load them into the
-// running environment.
-func (r *Rewriter) Reload(root string, pkgPath []string, interp Interpreter) error {
-	// - Reparse all given packages.  All pkg paths are relative to the given
-	//   root.
-	// - If there are *new* functions, create them via interp.Eval().
-	// - Compare all the toplevel functions & methods in the new files to the
-	//   old files.  If they're different, run their setter function.
 	return nil
 }
 
@@ -141,7 +135,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 			ident.Name = exportPrefix + ident.Name
 		}
 		if addPackage && definedInThisPackage[obj] {
-			log.Printf("Add package to %s", ident.Name)
+			// log.Printf("Add package to %s", ident.Name)
 			addPackageIdent[ident] = true
 		}
 	}
@@ -156,111 +150,35 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 					if !addPackageIdent[n] {
 						return true
 					}
-					log.Printf("Adding package to %s", n.Name)
+					// log.Printf("Adding package to %s", n.Name)
 					c.Replace(newSelector(pkg.Name, n.Name))
 				}
 				return true
 			}
 			file = astutil.Apply(file, pre, nil).(*ast.File)
 		}
-	}
-
-	// generate symbol registration
-	trailer, err := extract.GenContent(pkg.PkgPath, pkg.Types)
-	if err != nil {
-		return fmt.Errorf("Failed generating symbol registration for %s: %w", pkg.PkgPath, err)
-	}
-
-	// log.Printf("Trailer: %s", string(trailer))
-	// parse the generated symbol registration source code into an AST
-	trailerFileAST, err := parser.ParseFile(pkg.Fset, "registration.go", trailer, 0)
-	if err != nil {
-		log.Fatalf("Failed parsing symbol registration for %s: %v", pkg.PkgPath, err)
-	}
-
-	// combine the generated symbol registration source code with the first file in the package
-	file := pkg.Syntax[0]
-
-	// log.Printf("current file:")
-	// err = ast.Fprint(os.Stderr, pkg.Fset, file, nil)
-	// if err != nil {
-	// 	return fmt.Errorf("Error formatting current file: %w", err)
-	// }
-
-	// log.Printf("trailer file:")
-	// err = ast.Fprint(os.Stderr, nil, trailerFileAST, nil)
-	// if err != nil {
-	// 	return fmt.Errorf("Error formatting trailer file: %w", err)
-	// }
-
-	if len(file.Decls) == 0 {
-		// I think?  Covers imports and other stuff from the trailer.
-		file.Decls = trailerFileAST.Decls
 	} else {
-		var trailerImports []ast.Spec
-		var importDecl *ast.GenDecl
-
-		// Find the ImportSpec in the trailer, save the imports, and remove the
-		// decl itself.
-		cont := true
-		found := false
-		pre := func(c *astutil.Cursor) bool {
-			switch n := c.Node().(type) {
-			case *ast.GenDecl:
-				if n.Tok == token.IMPORT {
-					found = true
-					importDecl = n
-					trailerImports = n.Specs
-					c.Delete()
-					cont = false
-				}
-				return cont
-			}
-			return cont
+		// Generate symbol registrations.  (Not needed if !addPackage, i.e., in
+		// reload mode.)
+		var setters []string
+		for setter := range r.NewFunc[pkg.PkgPath] {
+			setters = append(setters, setter)
 		}
-		trailerFileAST = astutil.Apply(trailerFileAST, pre, nil).(*ast.File)
-
-		// Only try to append the imports if we actually found any.
-		if found {
-			// find the ImportSpec (if any) in the original file and append to it
-			cont = true
-			found := false
-			pre = func(c *astutil.Cursor) bool {
-				switch n := c.Node().(type) {
-				case *ast.GenDecl:
-					if n.Tok == token.IMPORT {
-						found = true
-						n.Specs = append(n.Specs, trailerImports...)
-						cont = false
-					}
-					return cont
-				}
-				return cont
-			}
-			file = astutil.Apply(file, pre, nil).(*ast.File)
-
-			if !found {
-				// Original file *has* no imports to append to.  Create them.
-				file.Decls = append([]ast.Decl{importDecl}, file.Decls...)
-			}
+		registrations, err := extract.GenContent(pkg.PkgPath, pkg.Types, setters)
+		if err != nil {
+			return fmt.Errorf("Failed generating symbol registration for %s: %w", pkg.PkgPath, err)
 		}
 
-		// Append the other decls (imports deleted above).
-		file.Decls = append(file.Decls, trailerFileAST.Decls...)
+		// log.Printf("generated grl_register.go: %s", string(registrations))
+		r.Info[pkg] = &Info{Registrations: registrations}
 	}
 
-	// log.Printf("updated file:")
-	// err = ast.Fprint(os.Stderr, pkg.Fset, file, nil)
+	// b := bytes.Buffer{}
+	// err = format.Node(&b, pkg.Fset, file)
 	// if err != nil {
-	// 	return fmt.Errorf("Error formatting trailer file: %w", err)
+	// 	return fmt.Errorf("Error formatting updated file: %w", err)
 	// }
-
-	b := bytes.Buffer{}
-	err = format.Node(&b, pkg.Fset, file)
-	if err != nil {
-		return fmt.Errorf("Error formatting updated file: %w", err)
-	}
-	log.Printf("Updated file: %s", b.String())
+	// log.Printf("Updated file: %s", b.String())
 	return nil
 }
 
@@ -281,7 +199,7 @@ func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, ob
 	for _, file := range pkg.Syntax {
 		filename := pkg.Fset.Position(file.Pos()).Filename
 		objFileName := pkg.Fset.Position(obj.Pos()).Filename
-		log.Printf("Looking at %q vs. %q", filename, objFileName)
+		// log.Printf("Looking at %q vs. %q", filename, objFileName)
 		if filename == objFileName {
 			path, exact := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
 			// log.Printf("func %s: exact: %v, %#v\n", obj.Name(), exact, path)
@@ -294,7 +212,7 @@ func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, ob
 					if ok {
 						// log.Printf("func %s: marking for translation\n", obj.Name())
 						funcs[funcDecl] = obj.Name()
-						log.Printf("Tagging %s for translation", obj.Name())
+						// log.Printf("Tagging %s for translation", obj.Name())
 						return
 					}
 				}
@@ -328,7 +246,7 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 					// These are like a stack, so in the emitted source, the
 					// current func will come first, then newVar, then setFunc,
 					// then register.
-					//					c.InsertAfter(register)
+					//	c.InsertAfter(register)
 					c.InsertAfter(setFunc)
 					c.InsertAfter(newVar)
 
@@ -336,7 +254,7 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 					if r.NewFunc[pkg.PkgPath] == nil {
 						r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
 					}
-					log.Printf("Storing %s:%s", pkg.PkgPath, setFunc.Name.Name)
+					// log.Printf("Storing %s:%s", pkg.PkgPath, setFunc.Name.Name)
 					r.NewFunc[pkg.PkgPath][setFunc.Name.Name] =
 						newVar.Specs[0].(*ast.ValueSpec).Values[0].(*ast.FuncLit)
 				}
@@ -572,13 +490,62 @@ func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet,
 	return nil, nil, fmt.Errorf("File %s not found in parsed files", targetFileName)
 }
 
-func (r *Rewriter) FuncDef(pkgPath, setter string) (string, error) {
+func (r *Rewriter) FuncDef(pkgPath, setter string) (string, map[string]string, error) {
 	for _, pkg := range r.Pkgs {
-		if pkg.PkgPath == pkgPath {
-			b := &bytes.Buffer{}
-			format.Node(b, pkg.Fset, r.NewFunc[pkgPath][setter])
-			return b.String(), nil
+		if pkg.PkgPath != pkgPath {
+			continue
 		}
+		funcAst := r.NewFunc[pkgPath][setter]
+
+		// log.Printf("Setter %s ast\n", setter)
+		// ast.Print(pkg.Fset, funcAst)
+
+		// Find the file this function is in
+		fName := pkg.Fset.Position(funcAst.Pos()).Filename
+		file, _, err := r.LookupFile(fName)
+		if err != nil {
+			return "", nil, err
+		}
+
+		// Build a map of import names & paths that this file imports.
+		imports := map[string]string{}
+		usedImports := map[string]string{}
+		for _, imp := range file.Imports {
+			impPath := strings.Trim(imp.Path.Value, "\"")
+			name := path.Base(impPath)
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			imports[name] = impPath
+
+			// Mark all dot-imports as used.  Because we won't know, do we?
+			if name == "." {
+				usedImports["."] = impPath
+			}
+		}
+		// log.Printf("File %s imports %#v", fName, imports)
+
+		// Traverse the function's AST and find all SelectorExprs that look like
+		// package references.  FIXME: This will probably break if somebody
+		// shadows a package name (sigh).
+		pre := func(c *astutil.Cursor) bool {
+			switch n := c.Node().(type) {
+			case *ast.SelectorExpr:
+				if x, ok := n.X.(*ast.Ident); ok {
+					// log.Printf("Looking at selector %#v", x.Name)
+					if impPath, ok := imports[x.Name]; ok {
+						usedImports[x.Name] = impPath
+					}
+				}
+			}
+			return true
+		}
+		_ = astutil.Apply(funcAst, pre, nil)
+		// log.Printf("Setter %s uses %v", setter, usedImports)
+
+		b := &bytes.Buffer{}
+		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][setter])
+		return b.String(), usedImports, nil
 	}
-	return "", fmt.Errorf("No setter found for %s:%s", pkgPath, setter)
+	return "", nil, fmt.Errorf("No setter found for %s:%s", pkgPath, setter)
 }

@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/huckridgesw/got-reload/pkg/gotreload"
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
+	"github.com/traefik/yaegi/stdlib/unrestricted"
 )
 
 const PackageListEnv = "GOT_RELOAD_PKGS"
@@ -76,7 +78,7 @@ func StartWatching(list string) <-chan string {
 		log.Fatalf("Error rewriting packages: %s: %v", list, err)
 	}
 
-	log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
+	// log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
 	out := make(chan string)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -105,18 +107,17 @@ func StartWatching(list string) <-chan string {
 }
 
 func Start() {
-	log.Printf("Reloader Starting: 11:00")
-	log.Printf("Registered symbols: %v", gotreload.RegisteredSymbols)
+	// log.Printf("Registered symbols: %v", gotreload.RegisteredSymbols)
 	list := os.Getenv(PackageListEnv)
 	changesCh := StartWatching(list)
-	const dur = 2 * time.Second
+	const dur = time.Second
 	go func() {
 		var timer *time.Timer
 		mux := sync.Mutex{}
 		changes := map[string]bool{}
 
 		for change := range changesCh {
-			log.Printf("Changed: %s", change)
+			// log.Printf("Changed: %s", change)
 			mux.Lock()
 			changes[change] = true
 			if timer != nil {
@@ -127,7 +128,7 @@ func Start() {
 				timer = nil
 
 				for updated := range changes {
-					log.Printf("Reparsing due to %s", updated)
+					// log.Printf("Reparsing due to %s", updated)
 					newR := &gotreload.Rewriter{}
 					err := newR.Load("file=" + updated)
 					if err != nil {
@@ -144,76 +145,82 @@ func Start() {
 						if name == updated {
 							continue
 						}
-						log.Printf("Ignoring %s since it's in the same package", name)
+						// log.Printf("Ignoring %s since it's in the same package", name)
 						delete(changes, name)
 					}
 
 					rMux.Lock()
 
-					log.Printf("Looking for pkg %s", newPkg.PkgPath)
+					// log.Printf("Looking for pkg %s", newPkg.PkgPath)
 					for pkgPath, pkgSetters := range newR.NewFunc {
 						if pkgPath != newPkg.PkgPath {
-							log.Printf("Skipping %s", pkgPath)
+							// log.Printf("Skipping %s", pkgPath)
 							continue
 						}
 
-						log.Printf("Looking for setters in %s", newPkg.PkgPath)
+						// log.Printf("Looking for setters in %s", newPkg.PkgPath)
 						for setter := range pkgSetters {
-							log.Printf("Looking at setter & func %s", setter)
+							// log.Printf("Looking at setter & func %s", setter)
 
-							origDef, err := r.FuncDef(newPkg.PkgPath, setter)
+							origDef, _, err := r.FuncDef(newPkg.PkgPath, setter)
 							if err != nil {
 								log.Printf("Error getting function definition of %s:%s: %v",
 									newPkg.PkgPath, setter, err)
 								continue
 							}
-							newDef, err := newR.FuncDef(newPkg.PkgPath, setter)
+							newDef, imports, err := newR.FuncDef(newPkg.PkgPath, setter)
 							if err != nil {
 								log.Printf("Error getting function definition of %s:%s: %v",
 									newPkg.PkgPath, setter, err)
 								continue
 							}
 							if origDef == newDef {
-								log.Printf("Skip %s", setter)
+								// log.Printf("Skip %s", setter)
 							} else {
-								log.Printf("Call %s: %s", setter, newDef)
+								// log.Printf("Call %s: %s", setter, newDef)
 
 								i := interp.New(interp.Options{})
 								i.Use(stdlib.Symbols)
+								i.Use(unrestricted.Symbols)
 								// i.Use(interp.Symbols)
-								// yaegi.Use(giopkgs.Symbols)
 								i.Use(gotreload.RegisteredSymbols)
-								imports := []string{}
-								for importPath := range gotreload.RegisteredSymbols {
-									imports = append(imports, importPath)
+								var importList []string
+								for name, impPath := range imports {
+									var impLine string
+									if name == path.Base(impPath) {
+										impLine = fmt.Sprintf("%q", impPath)
+									} else {
+										impLine = fmt.Sprintf("%s %q", name, impPath)
+									}
+									importList = append(importList, impLine)
 								}
-								func() {
-									eFunc := fmt.Sprintf(`
+								impString := strings.Join(importList, "\n")
+								eFunc := fmt.Sprintf(`
 package main
 import (
-	%q
+%q
+%s
 )
 func main() {
 	%s.%s(%s)
 }
-`, newPkg.PkgPath, newPkg.Name, setter, newDef)
+`, newPkg.PkgPath, impString, newPkg.Name, setter, newDef)
 
+								// log.Printf("Eval: %s", eFunc)
+								_, err := i.Eval(eFunc)
+								if err == nil {
+									log.Printf("Ran %s", setter)
+								} else {
 									log.Printf("Eval: %s", eFunc)
-									_, err := i.Eval(eFunc)
-									if err != nil {
-										log.Printf("Eval error: %v", err)
-										return
-									}
-									// YY_invalidate(hub, "yaegi")
-									log.Println("yaegi successful")
-								}()
+									log.Printf("Eval error: %v", err)
+								}
 							}
 						}
 					}
 
 					for i, pkg := range r.Pkgs {
 						if pkg.PkgPath == newPkg.PkgPath {
-							log.Printf("Replacing %s in r", newPkg.PkgPath)
+							// log.Printf("Replacing %s in r", newPkg.PkgPath)
 							r.Pkgs[i] = newPkg
 							break
 						}
