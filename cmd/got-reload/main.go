@@ -235,9 +235,11 @@ func toolexec(selfName string, args []string) {
 
 func run(selfName string, args []string) {
 	var packages string
+	var verbose bool
 	set := flag.NewFlagSet(selfName, flag.ExitOnError)
 	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
 	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
+	set.BoolVar(&verbose, "v", false, "Pass -v to \"go run\" command")
 	set.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
 
@@ -260,6 +262,12 @@ Flags:
 	}
 
 	os.Setenv(reloader.PackageListEnv, packages)
+	os.Setenv(reloader.StartReloaderEnv, "1")
+
+	deps, err := addDependencies(packageList)
+	if err != nil {
+		log.Fatalf("Error rewriting packages: %v", err)
+	}
 
 	// This is either "got-reload" or whatever executable "go run" builds.  (I
 	// mention this in part because if you search the source for "got-reload" I
@@ -277,11 +285,21 @@ Flags:
 	}
 
 	toolexecValue := absExecutable + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
-	cmd := exec.CommandContext(context.TODO(), "go", "run", "-toolexec", toolexecValue, runPackage)
+	goArgs := []string{"run", "-toolexec", toolexecValue}
+	if verbose {
+		goArgs = append(goArgs, "-v")
+	}
+	goArgs = append(goArgs, runPackage)
+	cmd := exec.CommandContext(context.TODO(), "go", goArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Run()
+
+	// FIXME: do this even in the face of SIGINT / ^C.
+	for _, f := range deps {
+		os.Remove(f)
+	}
 }
 
 func main() {
@@ -333,10 +351,9 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 }
 
 // Write the grl_register.go file.
-//
-// Since we only run toolexec on a single package, there will only be a single
-// package to worry about in r.Pkgs.
 func writeRegister(r *gotreload.Rewriter) (outputFileNames string, err error) {
+	// Since we only run toolexec on a single package, there will only be a
+	// single package to in r.Pkgs.
 	pkg := r.Pkgs[0]
 	// log.Printf("write register for %s", pkg.Name)
 	outputFileName, err := writeTempFile(r.Info[pkg].Registrations, "grl_register.go")
@@ -366,4 +383,49 @@ func writeTempFile(source []byte, targetFileName string) (string, error) {
 		return "", err
 	}
 	return outputFileName, nil
+}
+
+// Write the grl_dependencies file for each pkg.
+func addDependencies(packageList []string) ([]string, error) {
+	r := gotreload.Rewriter{}
+	err := r.Load(packageList...)
+	if err != nil {
+		return nil, err
+	}
+
+	var deps []string
+
+	for _, pkg := range r.Pkgs {
+		if len(pkg.Syntax) == 0 {
+			continue
+		}
+		file := pkg.Syntax[0]
+		pkgName := file.Name.Name
+		fileName := pkg.Fset.Position(file.Pos()).Filename
+		dir := filepath.Dir(fileName)
+		fullpath := filepath.Join(dir, "grl_dependencies.go")
+		err := ioutil.WriteFile(fullpath,
+			[]byte(fmt.Sprintf(`package %s
+
+import (
+	"reflect"
+
+	"github.com/huckridgesw/got-reload/pkg/gotreload"
+	_ "github.com/huckridgesw/got-reload/pkg/reloader/start"
+)
+
+var (
+	_ = reflect.ValueOf
+	_ = gotreload.RegisterAll
+)
+`, pkgName)),
+			0600)
+		if err != nil {
+			return deps, fmt.Errorf("Error writing %s/grl_dependencies.go: %w", pkgName, err)
+		}
+		deps = append(deps, fullpath)
+		// log.Printf("Wrote %s", fullpath)
+	}
+
+	return deps, nil
 }

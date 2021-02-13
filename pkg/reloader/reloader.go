@@ -9,7 +9,7 @@ package reloader
 import (
 	"context"
 	"fmt"
-	"log"
+	lpkg "log"
 	"os"
 	"os/exec"
 	"path"
@@ -25,9 +25,15 @@ import (
 	"github.com/traefik/yaegi/stdlib/unrestricted"
 )
 
-const PackageListEnv = "GOT_RELOAD_PKGS"
+const (
+	PackageListEnv   = "GOT_RELOAD_PKGS"
+	StartReloaderEnv = "GOT_RELOAD_START_RELOADER"
+)
 
 var (
+	// Use our own logger.
+	log = lpkg.New(os.Stderr, "", lpkg.Lshortfile)
+
 	// WatchedPkgs is the list of packages being watched for live reloading.
 	// It is populated at init time from the process environment.
 	WatchedPkgs = watchPackages()
@@ -68,8 +74,8 @@ func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 
 var rMux sync.Mutex
 
-func StartWatching(list string) <-chan string {
-	err := r.Load(list)
+func StartWatching(list []string) <-chan string {
+	err := r.Load(list...)
 	if err != nil {
 		log.Fatalf("Error parsing packages: %v", err)
 	}
@@ -85,6 +91,7 @@ func StartWatching(list string) <-chan string {
 		return nil
 	}
 	for dir := range DirsToPkgs {
+		log.Printf("Watching %s", dir)
 		err := watcher.Add(dir)
 		if err != nil {
 			return nil
@@ -98,6 +105,8 @@ func StartWatching(list string) <-chan string {
 				rMux.Lock()
 				if _, _, err := r.LookupFile(abs); err == nil {
 					out <- abs
+				} else {
+					// log.Printf("An unknown file changed: %s", abs)
 				}
 				rMux.Unlock()
 			}
@@ -107,9 +116,9 @@ func StartWatching(list string) <-chan string {
 }
 
 func Start() {
+	log.Println("Starting reloader")
 	// log.Printf("Registered symbols: %v", gotreload.RegisteredSymbols)
-	list := os.Getenv(PackageListEnv)
-	changesCh := StartWatching(list)
+	changesCh := StartWatching(WatchedPkgs)
 	const dur = time.Second
 	go func() {
 		var timer *time.Timer
@@ -129,7 +138,7 @@ func Start() {
 
 				for updated := range changes {
 					// log.Printf("Reparsing due to %s", updated)
-					newR := &gotreload.Rewriter{}
+					newR := gotreload.Rewriter{}
 					err := newR.Load("file=" + updated)
 					if err != nil {
 						log.Fatalf("Error parsing package containing file %s: %v", change, err)
@@ -139,6 +148,8 @@ func Start() {
 						log.Fatalf("Error rewriting package for %s: %v", change, err)
 					}
 
+					// Ignore any other files from the same package that also
+					// changed.
 					newPkg := newR.Pkgs[0]
 					for _, fileNode := range newPkg.Syntax {
 						name := newPkg.Fset.Position(fileNode.Pos()).Filename
@@ -152,50 +163,47 @@ func Start() {
 					rMux.Lock()
 
 					// log.Printf("Looking for pkg %s", newPkg.PkgPath)
-					for pkgPath, pkgSetters := range newR.NewFunc {
-						if pkgPath != newPkg.PkgPath {
-							// log.Printf("Skipping %s", pkgPath)
+					pkgPath := newR.Pkgs[0].PkgPath
+					pkgSetters := newR.NewFunc[newR.Pkgs[0].PkgPath]
+
+					// log.Printf("Looking for setters in %s", pkgPath)
+					for setter := range pkgSetters {
+						// log.Printf("Looking at setter & func %s", setter)
+
+						origDef, _, err := r.FuncDef(pkgPath, setter)
+						if err != nil {
+							log.Printf("Error getting function definition of %s:%s: %v",
+								pkgPath, setter, err)
 							continue
 						}
+						newDef, imports, err := newR.FuncDef(pkgPath, setter)
+						if err != nil {
+							log.Printf("Error getting function definition of %s:%s: %v",
+								pkgPath, setter, err)
+							continue
+						}
+						if origDef == newDef {
+							// log.Printf("Skip %s", setter)
+						} else {
+							// log.Printf("Call %s: %s", setter, newDef)
 
-						// log.Printf("Looking for setters in %s", newPkg.PkgPath)
-						for setter := range pkgSetters {
-							// log.Printf("Looking at setter & func %s", setter)
-
-							origDef, _, err := r.FuncDef(newPkg.PkgPath, setter)
-							if err != nil {
-								log.Printf("Error getting function definition of %s:%s: %v",
-									newPkg.PkgPath, setter, err)
-								continue
-							}
-							newDef, imports, err := newR.FuncDef(newPkg.PkgPath, setter)
-							if err != nil {
-								log.Printf("Error getting function definition of %s:%s: %v",
-									newPkg.PkgPath, setter, err)
-								continue
-							}
-							if origDef == newDef {
-								// log.Printf("Skip %s", setter)
-							} else {
-								// log.Printf("Call %s: %s", setter, newDef)
-
-								i := interp.New(interp.Options{})
-								i.Use(stdlib.Symbols)
-								i.Use(unrestricted.Symbols)
-								// i.Use(interp.Symbols)
-								i.Use(gotreload.RegisteredSymbols)
-								var importList []string
-								for name, impPath := range imports {
-									var impLine string
-									if name == path.Base(impPath) {
-										impLine = fmt.Sprintf("%q", impPath)
-									} else {
-										impLine = fmt.Sprintf("%s %q", name, impPath)
-									}
-									importList = append(importList, impLine)
+							i := interp.New(interp.Options{})
+							i.Use(stdlib.Symbols)
+							i.Use(unrestricted.Symbols)
+							// i.Use(interp.Symbols)
+							i.Use(gotreload.RegisteredSymbols)
+							var importList []string
+							for name, impPath := range imports {
+								var impLine string
+								if name == path.Base(impPath) {
+									impLine = fmt.Sprintf("%q", impPath)
+								} else {
+									impLine = fmt.Sprintf("%s %q", name, impPath)
 								}
-								impString := strings.Join(importList, "\n")
-								eFunc := fmt.Sprintf(`
+								importList = append(importList, impLine)
+							}
+							impString := strings.Join(importList, "\n")
+							eFunc := fmt.Sprintf(`
 package main
 import (
 %q
@@ -204,28 +212,28 @@ import (
 func main() {
 	%s.%s(%s)
 }
-`, newPkg.PkgPath, impString, newPkg.Name, setter, newDef)
+`, pkgPath, impString, newPkg.Name, setter, newDef)
 
-								// log.Printf("Eval: %s", eFunc)
-								_, err := i.Eval(eFunc)
-								if err == nil {
-									log.Printf("Ran %s", setter)
-								} else {
-									log.Printf("Eval: %s", eFunc)
-									log.Printf("Eval error: %v", err)
-								}
+							// log.Printf("Eval: %s", eFunc)
+							_, err := i.Eval(eFunc)
+							if err == nil {
+								log.Printf("Ran %s", setter)
+							} else {
+								log.Printf("Eval: %s", eFunc)
+								log.Printf("Eval error: %v", err)
 							}
 						}
 					}
 
+					// Update r with data from newR
 					for i, pkg := range r.Pkgs {
-						if pkg.PkgPath == newPkg.PkgPath {
-							// log.Printf("Replacing %s in r", newPkg.PkgPath)
+						if pkg.PkgPath == pkgPath {
+							// log.Printf("Replacing %s in r", pkgPath)
 							r.Pkgs[i] = newPkg
 							break
 						}
 					}
-					r.NewFunc = newR.NewFunc
+					r.NewFunc[pkgPath] = newR.NewFunc[pkgPath]
 
 					rMux.Unlock()
 
