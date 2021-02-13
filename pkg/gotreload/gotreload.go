@@ -73,7 +73,8 @@ func (r *Rewriter) Load(paths ...string) error {
 	return nil
 }
 
-// Rewrite rewrites the ASTs in r.Pkgs in place.
+// Rewrite rewrites the ASTs in r.Pkgs in place.  addPackage==true is used in
+// reload mode, to add package prefixes to all mentioned variables.
 func (r *Rewriter) Rewrite(addPackage bool) error {
 	for _, pkg := range r.Pkgs {
 		if pkg.TypesInfo == nil {
@@ -242,11 +243,9 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 						return false
 					}
 
-					newVar, setFunc, _ := rewriteFunc(pkg.PkgPath, name, n)
+					newVar, setFunc := rewriteFunc(pkg.PkgPath, name, n)
 					// These are like a stack, so in the emitted source, the
-					// current func will come first, then newVar, then setFunc,
-					// then register.
-					//	c.InsertAfter(register)
+					// current func will come first, then newVar, then setFunc.
 					c.InsertAfter(setFunc)
 					c.InsertAfter(newVar)
 
@@ -292,7 +291,7 @@ func (r *Rewriter) Print(root string) error {
 // AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
-func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncDecl, *ast.FuncDecl) {
+func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncDecl) {
 	newVarType := copyFuncType(node.Type)
 
 	var newArgs []ast.Expr
@@ -406,26 +405,9 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 					Rhs: []ast.Expr{newIdent("f")},
 				}}}}
 
-	// Define the register init() call.
-	register := &ast.FuncDecl{
-		Name: newIdent("init"),
-		Type: &ast.FuncType{Params: &ast.FieldList{}},
-		Body: &ast.BlockStmt{
-			List: []ast.Stmt{
-				&ast.ExprStmt{
-					X: &ast.CallExpr{
-						Fun: newSelector(thisPackageName, "Register"),
-						Args: []ast.Expr{
-							newStringLit(pkgPath),
-							newStringLit(setPrefix + name),
-							&ast.CallExpr{
-								Fun:  newSelector("reflect", "ValueOf"),
-								Args: []ast.Expr{newIdent(setPrefix + name)},
-							}}}}}}}
-
 	// Replace the node's body with the new body in-place.
 	node.Body = body
-	return newVar, setFunc, register
+	return newVar, setFunc
 }
 
 func newSelector(x, sel string) *ast.SelectorExpr {
@@ -479,9 +461,12 @@ func RegisterAll(symbols interp.Exports) {
 }
 
 func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet, error) {
+	// log.Printf("LookupFile looking for %s", targetFileName)
 	for _, pkg := range r.Pkgs {
+		// log.Printf("LookupFile considering package %s", pkg.Name)
 		for _, file := range pkg.Syntax {
 			name := pkg.Fset.Position(file.Pos()).Filename
+			// log.Printf("LookupFile considering file %s", name)
 			if targetFileName == name {
 				return file, pkg.Fset, nil
 			}
