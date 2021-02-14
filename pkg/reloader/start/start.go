@@ -6,7 +6,7 @@ package start
 import (
 	"os"
 
-	"github.com/huckridgesw/got-reload/pkg/reloader"
+	"github.com/got-reload/got-reload/pkg/reloader"
 )
 
 func init() {

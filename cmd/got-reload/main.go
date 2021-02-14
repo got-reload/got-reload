@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/huckridgesw/got-reload/pkg/gotreload"
-	"github.com/huckridgesw/got-reload/pkg/reloader"
+	"github.com/got-reload/got-reload/pkg/gotreload"
+	"github.com/got-reload/got-reload/pkg/reloader"
 )
 
 type ExitCode int
@@ -410,8 +410,8 @@ func addDependencies(packageList []string) ([]string, error) {
 import (
 	"reflect"
 
-	"github.com/huckridgesw/got-reload/pkg/gotreload"
-	_ "github.com/huckridgesw/got-reload/pkg/reloader/start"
+	"github.com/got-reload/got-reload/pkg/gotreload"
+	_ "github.com/got-reload/got-reload/pkg/reloader/start"
 )
 
 var (

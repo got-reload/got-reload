@@ -1,4 +1,4 @@
-module github.com/huckridgesw/got-reload
+module github.com/got-reload/got-reload
 
 go 1.15
 

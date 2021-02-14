@@ -16,7 +16,7 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-const cmdPath = "github.com/huckridgesw/hot-reload/cmd/hot-reload"
+const cmdPath = "github.com/got-reload/hot-reload/cmd/hot-reload"
 
 var (
 	testFile1 = `

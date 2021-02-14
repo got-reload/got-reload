@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/huckridgesw/got-reload/demo/example"
-	"github.com/huckridgesw/got-reload/demo/example2"
+	"github.com/got-reload/got-reload/demo/example"
+	"github.com/got-reload/got-reload/demo/example2"
 )
 
 func main() {

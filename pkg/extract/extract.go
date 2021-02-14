@@ -37,7 +37,7 @@ import (
 	{{- end}}
 {{- end}}
 	"reflect"
-	"github.com/huckridgesw/got-reload/pkg/gotreload"
+	"github.com/got-reload/got-reload/pkg/gotreload"
 )
 
 func init() {

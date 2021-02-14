@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/huckridgesw/got-reload/pkg/gotreload"
+	"github.com/got-reload/got-reload/pkg/gotreload"
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
 	"github.com/traefik/yaegi/stdlib/unrestricted"

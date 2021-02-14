@@ -14,7 +14,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/huckridgesw/got-reload/pkg/extract"
+	"github.com/got-reload/got-reload/pkg/extract"
 	"github.com/traefik/yaegi/interp"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
