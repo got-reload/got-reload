@@ -14,8 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/got-reload/got-reload/pkg/extract"
 	"github.com/got-reload/got-reload/pkg/gotreload"
 	"github.com/got-reload/got-reload/pkg/reloader"
+	"golang.org/x/tools/go/packages"
 )
 
 type ExitCode int
@@ -32,7 +34,9 @@ const (
 	FailedCleanup
 )
 
-var Usage string = `%[1]s:
+var ToolexecUsage string = `%[1]s:
+
+%[1]s filter [flags]
 
 %[1]s [flags] %[2]s <go compiler invocation>
 
@@ -45,6 +49,11 @@ You *must* provide the "%[2]s" to denote the boundary between flags to
 %[1]s and the following go compiler invocation.
 
 Flags:
+`
+
+var FilterUsage string = `%[1]s filter -out <dir> package [package ...]
+
+Filter the given packages, and write them to directory tree specified by -out.
 `
 
 func indexOf(target string, input []string) int {
@@ -103,20 +112,25 @@ func runAsSubprocess(version string, command []string, logIt bool) error {
 const (
 	subcommandToolexec = "toolexec"
 	subcommandRun      = "run"
+	subcommandFilter   = "filter"
 )
 
 var subcommands = map[string]func(selfName string, args []string){
-	subcommandToolexec: toolexec,
-	subcommandRun:      run,
+	// subcommandToolexec: toolexec,
+	// subcommandRun:      run,
+	subcommandFilter: filter,
 }
 
 func toolexec(selfName string, args []string) {
+	panic("toolexec not supported")
 	var packages string
+	var keep bool
 	set := flag.NewFlagSet(selfName, flag.ExitOnError)
 	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
 	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
+	set.BoolVar(&keep, "keep", false, "Keep all the filtered code")
 	set.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), Usage, selfName, argListDelimiter)
+		fmt.Fprintf(flag.CommandLine.Output(), ToolexecUsage, selfName, argListDelimiter)
 		set.PrintDefaults()
 	}
 	if err := set.Parse(args); err != nil {
@@ -150,11 +164,13 @@ func toolexec(selfName string, args []string) {
 
 		// Clean up all our generated *.go files.
 		exitCode := Success
-		for _, f := range toDelete {
-			err := os.Remove(f)
-			if err != nil {
-				exitCode = FailedCleanup
-				fmt.Fprintf(os.Stderr, "Error removing %s: %v", f, err)
+		if !keep {
+			for _, f := range toDelete {
+				err := os.Remove(f)
+				if err != nil {
+					exitCode = FailedCleanup
+					fmt.Fprintf(os.Stderr, "Error removing %s: %v", f, err)
+				}
 			}
 		}
 
@@ -234,12 +250,15 @@ func toolexec(selfName string, args []string) {
 }
 
 func run(selfName string, args []string) {
+	panic("run not supported")
+
 	var packages string
-	var verbose bool
+	var verbose, keep bool
 	set := flag.NewFlagSet(selfName, flag.ExitOnError)
 	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
 	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
 	set.BoolVar(&verbose, "v", false, "Pass -v to \"go run\" command")
+	set.BoolVar(&keep, "keep", false, "Keep all the filtered code")
 	set.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
 
@@ -284,8 +303,12 @@ Flags:
 		absExecutable = os.Args[0]
 	}
 
-	toolexecValue := absExecutable + " " + subcommandToolexec + " -p " + packages + " " + argListDelimiter
-	goArgs := []string{"run", "-toolexec", toolexecValue}
+	toolexecArgs := []string{absExecutable, subcommandToolexec, "-p", packages}
+	if keep {
+		toolexecArgs = append(toolexecArgs, "-keep")
+	}
+	toolexecArgs = append(toolexecArgs, argListDelimiter)
+	goArgs := []string{"run", "-toolexec", strings.Join(toolexecArgs, " ")}
 	if verbose {
 		goArgs = append(goArgs, "-v")
 	}
@@ -297,8 +320,10 @@ Flags:
 	cmd.Run()
 
 	// FIXME: do this even in the face of SIGINT / ^C.
-	for _, f := range deps {
-		os.Remove(f)
+	if !keep {
+		for _, f := range deps {
+			os.Remove(f)
+		}
 	}
 }
 
@@ -355,7 +380,7 @@ func writeRegister(r *gotreload.Rewriter) (outputFileNames string, err error) {
 	// Since we only run toolexec on a single package, there will only be a
 	// single package to in r.Pkgs.
 	pkg := r.Pkgs[0]
-	// log.Printf("write register for %s", pkg.Name)
+	log.Printf("register for %s: %s", pkg.Name, string(r.Info[pkg].Registrations))
 	outputFileName, err := writeTempFile(r.Info[pkg].Registrations, "grl_register.go")
 	if err != nil {
 		return "", err
@@ -410,13 +435,13 @@ func addDependencies(packageList []string) ([]string, error) {
 import (
 	"reflect"
 
-	"github.com/got-reload/got-reload/pkg/gotreload"
+	"github.com/got-reload/got-reload/pkg/reloader"
 	_ "github.com/got-reload/got-reload/pkg/reloader/start"
 )
 
 var (
 	_ = reflect.ValueOf
-	_ = gotreload.RegisterAll
+	_ = reloader.RegisterAll
 )
 `, pkgName)),
 			0600)
@@ -428,4 +453,140 @@ var (
 	}
 
 	return deps, nil
+}
+
+func filter(selfName string, args []string) {
+	var outputDir string
+	set := flag.NewFlagSet(selfName, flag.ExitOnError)
+	set.StringVar(&outputDir, "dir", "", "The output directory for all filtered code")
+	set.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), FilterUsage, selfName)
+		set.PrintDefaults()
+	}
+	if err := set.Parse(args); err != nil {
+		set.Usage()
+		os.Exit(1)
+	}
+	if len(args) < 1 {
+		log.Fatal("No packages specified")
+	}
+	if outputDir == "" {
+		log.Fatal("No output directory specified")
+	}
+
+	pwd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Could not get current directory: %v", err)
+	}
+
+	packageList := set.Args()
+
+	// log.Printf("Parsing package %s", packageName)
+	r := &gotreload.Rewriter{}
+	err = r.Load(packageList...)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	err = r.Rewrite(false)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	allImports := map[*packages.Package]int{}
+	for _, pkg := range r.Pkgs {
+		// Is this even possible?
+		if len(pkg.Syntax) == 0 {
+			continue
+		}
+
+		var newDir string
+		for _, file := range pkg.Syntax {
+			// log.Printf("Writing filtered version of %s", targetFileName)
+			outputFileName := strings.TrimPrefix(pkg.Fset.Position(file.Pos()).Filename, pwd+"/")
+			newDir = filepath.Join(outputDir, filepath.Dir(outputFileName))
+			_, err := os.Stat(newDir)
+			if err != nil {
+				err := os.MkdirAll(newDir, 0755)
+				if err != nil {
+					log.Fatalf("Error creating %s: %v", newDir, err)
+				}
+			}
+			b := &bytes.Buffer{}
+			err = format.Node(b, pkg.Fset, file)
+			if err != nil {
+				log.Fatalf("Error formatting filtered version of %s: %v", outputFileName, err)
+			}
+			outputFilePath := filepath.Join(newDir, filepath.Base(outputFileName))
+			err = ioutil.WriteFile(outputFilePath, b.Bytes(), 0644)
+			if err != nil {
+				log.Fatalf("Error writing filtered version of %s to %s: %v", outputFileName, outputFilePath, err)
+			}
+			log.Printf("Wrote %s", outputFilePath)
+		}
+
+		outputFilePath := filepath.Join(newDir, "grl_register.go")
+		err := ioutil.WriteFile(outputFilePath, r.Info[pkg].Registrations, 0644)
+		if err != nil {
+			log.Fatalf("Error writing %s: %v", outputFilePath, err)
+		}
+		log.Printf("Wrote %s", outputFilePath)
+
+		allImportedPackages(allImports, pkg)
+	}
+
+	pkg0 := r.Pkgs[0]
+	path := filepath.Join(outputDir,
+		filepath.Dir(
+			strings.TrimPrefix(
+				pkg0.Fset.Position(pkg0.Syntax[0].Pos()).Filename,
+				pwd+"/")))
+	for pkg, state := range allImports {
+		if state != 2 {
+			continue
+		}
+
+		registrationSource, err := extract.GenContent(pkg0.Name, pkg.PkgPath, true, pkg.Types, nil, nil)
+		if err != nil {
+			log.Fatalf("Failed generating symbol registration for %s: %v", pkg.PkgPath, err)
+		}
+		fname := filepath.Join(path, "grl_"+strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(pkg.PkgPath)+".go")
+		log.Printf("Registrations for %s / %s -> %s", pkg.Name, pkg.PkgPath, fname)
+		// log.Println(string(registrationSource))
+		ioutil.WriteFile(fname, registrationSource, 0644)
+	}
+}
+
+func allImportedPackages(m map[*packages.Package]int, pkg *packages.Package) {
+	if m[pkg] > 0 {
+		return
+	}
+	log.Printf("Getting imported packages for %s / %s", pkg.Name, pkg.PkgPath)
+	for _, iPkg := range pkg.Imports {
+		if internalPkg(iPkg.PkgPath) || probablyStdLib(iPkg.PkgPath) {
+			if m[iPkg] == 0 {
+				log.Printf("Skipping %s", iPkg.PkgPath)
+				m[iPkg] = 1
+			}
+		} else {
+			allImportedPackages(m, iPkg)
+			m[iPkg] = 2
+		}
+	}
+}
+
+func internalPkg(dir string) bool {
+	for _, p := range strings.Split(dir, string(filepath.Separator)) {
+		if p == "internal" {
+			return true
+		}
+	}
+	return false
+}
+
+func probablyStdLib(dir string) bool {
+	baseDir := strings.Split(dir, string(filepath.Separator))[0]
+	if strings.ContainsRune(baseDir, '.') {
+		return false
+	}
+	return true
 }

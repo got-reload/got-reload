@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -23,16 +24,18 @@ import (
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
 	"github.com/traefik/yaegi/stdlib/unrestricted"
+	"golang.org/x/tools/go/packages"
 )
 
 const (
 	PackageListEnv   = "GOT_RELOAD_PKGS"
 	StartReloaderEnv = "GOT_RELOAD_START_RELOADER"
+	SourceDirEnv     = "GOT_RELOAD_SOURCE_DIR"
 )
 
 var (
 	// Use our own logger.
-	log = lpkg.New(os.Stderr, "", lpkg.Lshortfile)
+	log = lpkg.New(os.Stderr, "", lpkg.Lshortfile|lpkg.Lmicroseconds)
 
 	// WatchedPkgs is the list of packages being watched for live reloading.
 	// It is populated at init time from the process environment.
@@ -44,6 +47,27 @@ var (
 	r gotreload.Rewriter
 )
 
+var RegisteredSymbols = interp.Exports{}
+
+// Register records the mappings of exported symbol names to their values
+// within the compiled executable.
+func Register(pkgName, ident string, val reflect.Value) {
+	if RegisteredSymbols[pkgName] == nil {
+		RegisteredSymbols[pkgName] = map[string]reflect.Value{}
+	}
+	RegisteredSymbols[pkgName][ident] = val
+}
+
+// RegisterAll invokes Register once for each symbol provided in the symbols
+// map.
+func RegisterAll(symbols interp.Exports) {
+	for pkg, pkgSyms := range symbols {
+		for pkgSym, value := range pkgSyms {
+			Register(pkg, pkgSym, value)
+		}
+	}
+}
+
 func watchPackages() []string {
 	list := os.Getenv(PackageListEnv)
 	return strings.Split(list, ",")
@@ -52,6 +76,10 @@ func watchPackages() []string {
 func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 	pkgToDir, dirToPkg = make(map[string]string), make(map[string]string)
 	cmd := exec.CommandContext(context.TODO(), "go", "list", "-f", "{{.ImportPath}} {{.Dir}}", "./...")
+	cmd.Dir = os.Getenv(SourceDirEnv)
+	if cmd.Dir != "" {
+		log.Printf("Running go list from %s", cmd.Dir)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return
@@ -75,6 +103,7 @@ func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 var rMux sync.Mutex
 
 func StartWatching(list []string) <-chan string {
+	r.Config.Dir = os.Getenv(SourceDirEnv)
 	err := r.Load(list...)
 	if err != nil {
 		log.Fatalf("Error parsing packages: %v", err)
@@ -117,16 +146,16 @@ func StartWatching(list []string) <-chan string {
 
 func Start() {
 	log.Println("Starting reloader")
-	// log.Printf("Registered symbols: %v", gotreload.RegisteredSymbols)
+	// log.Printf("Registered symbols: %v", RegisteredSymbols)
 	changesCh := StartWatching(WatchedPkgs)
-	const dur = time.Second
+	const dur = 100 * time.Millisecond
 	go func() {
 		var timer *time.Timer
 		mux := sync.Mutex{}
 		changes := map[string]bool{}
 
 		for change := range changesCh {
-			// log.Printf("Changed: %s", change)
+			log.Printf("Changed: %s", change)
 			mux.Lock()
 			changes[change] = true
 			if timer != nil {
@@ -137,8 +166,8 @@ func Start() {
 				timer = nil
 
 				for updated := range changes {
-					// log.Printf("Reparsing due to %s", updated)
-					newR := gotreload.Rewriter{}
+					log.Printf("Reparsing due to %s", updated)
+					newR := gotreload.Rewriter{Config: packages.Config{Dir: os.Getenv(SourceDirEnv)}}
 					err := newR.Load("file=" + updated)
 					if err != nil {
 						log.Fatalf("Error parsing package containing file %s: %v", change, err)
@@ -191,7 +220,7 @@ func Start() {
 							i.Use(stdlib.Symbols)
 							i.Use(unrestricted.Symbols)
 							// i.Use(interp.Symbols)
-							i.Use(gotreload.RegisteredSymbols)
+							i.Use(RegisteredSymbols)
 							var importList []string
 							for name, impPath := range imports {
 								var impLine string

@@ -28,7 +28,7 @@ import (
 
 const model = `
 
-package {{.PkgName}}
+package {{.Dest}}
 
 import (
 {{- range $key, $value := .Imports }}
@@ -36,13 +36,17 @@ import (
 	"{{$key}}"
 	{{- end}}
 {{- end}}
+{{- if .ImportSelf}}
+	"{{.PkgName}}"
+{{- end}}
 	"reflect"
-	"github.com/got-reload/got-reload/pkg/gotreload"
+	"github.com/got-reload/got-reload/pkg/reloader"
+	_ "github.com/got-reload/got-reload/pkg/reloader/start"
 )
 
 func init() {
-	gotreload.RegisterAll(map[string]map[string]reflect.Value{
-    	                  "{{.PkgPath}}": map[string]reflect.Value{
+	reloader.RegisterAll(map[string]map[string]reflect.Value{
+    	                  "{{.PkgName}}": {
 		{{- if .Val}}
 		// function, constant and variable definitions
 		{{range $key, $value := .Val -}}
@@ -121,7 +125,7 @@ func matchList(name string, list []string) (match bool, err error) {
 	return
 }
 
-func GenContent(importPath string, p *types.Package, setFuncs []string) ([]byte, error) {
+func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, setFuncs []string, exported map[types.Object]bool) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
 
@@ -143,15 +147,23 @@ func GenContent(importPath string, p *types.Package, setFuncs []string) ([]byte,
 
 	for _, name := range sc.Names() {
 		o := sc.Lookup(name)
-		if !o.Exported() {
+		if exported[o] {
+			name = "GRL_" + name
+		} else if !o.Exported() {
+			// log.Printf("%s is not imported, skipping it", name)
 			continue
 		}
 
 		pname := name
-		if rname := path.Base(importPath) + name; restricted[rname] {
-			// Restricted symbol, locally provided by stdlib wrapper.
-			pname = rname
+		if importSelf {
+			pname = path.Base(importPath) + "." + name
 		}
+		// LMC: Not sure what this is all about.  We don't import the package
+		// that provides the custom implementation.
+		// if rname := path.Base(importPath) + name; restricted[rname] {
+		// 	// Restricted symbol, locally provided by stdlib wrapper.
+		// 	pname = rname
+		// }
 
 		switch o := o.(type) {
 		case *types.Const:
@@ -248,13 +260,15 @@ func GenContent(importPath string, p *types.Package, setFuncs []string) ([]byte,
 
 	b := new(bytes.Buffer)
 	data := map[string]interface{}{
-		"Imports":   imports,
-		"PkgName":   p.Name(),
-		"PkgPath":   importPath,
-		"Val":       val,
-		"Typ":       typ,
-		"Wrap":      wrap,
-		"BuildTags": buildTags,
+		"Dest":    destPkg,
+		"Imports": imports,
+		// "PkgName":   p.Name(),
+		"ImportSelf": importSelf,
+		"PkgName":    importPath,
+		"Val":        val,
+		"Typ":        typ,
+		"Wrap":       wrap,
+		"BuildTags":  buildTags,
 	}
 	err = parse.Execute(b, data)
 	if err != nil {

@@ -11,11 +11,9 @@ import (
 	"log"
 	"path"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/got-reload/got-reload/pkg/extract"
-	"github.com/traefik/yaegi/interp"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 )
@@ -58,6 +56,8 @@ func (r *Rewriter) Load(paths ...string) error {
 	r.Config.Mode |= packages.NeedName |
 		packages.NeedFiles |
 		packages.NeedCompiledGoFiles |
+		packages.NeedImports |
+		packages.NeedDeps |
 		packages.NeedTypes |
 		packages.NeedSyntax |
 		packages.NeedTypesInfo
@@ -90,6 +90,10 @@ func (r *Rewriter) Rewrite(addPackage bool) error {
 }
 
 func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
+	if pkg.Name == "main" {
+		return fmt.Errorf("Cannot rewrite package \"main\"")
+	}
+
 	exported := map[types.Object]bool{}
 	definedInThisPackage := map[types.Object]bool{}
 	funcs := map[*ast.FuncDecl]string{}
@@ -165,13 +169,13 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 		for setter := range r.NewFunc[pkg.PkgPath] {
 			setters = append(setters, setter)
 		}
-		registrations, err := extract.GenContent(pkg.PkgPath, pkg.Types, setters)
+		registrationSource, err := extract.GenContent(pkg.Name, pkg.PkgPath, false, pkg.Types, setters, exported)
 		if err != nil {
 			return fmt.Errorf("Failed generating symbol registration for %s: %w", pkg.PkgPath, err)
 		}
 
-		// log.Printf("generated grl_register.go: %s", string(registrations))
-		r.Info[pkg] = &Info{Registrations: registrations}
+		// log.Printf("generated grl_register.go: %s", string(registrationSource))
+		r.Info[pkg] = &Info{Registrations: registrationSource}
 	}
 
 	// b := bytes.Buffer{}
@@ -237,9 +241,9 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 				if name, ok := funcs[n]; ok {
 					// log.Printf("Translating %s\n", name)
 
-					// Skip all init() functions, and main.main().
-					if name == "init" ||
-						(pkg.Name == "main" && name == "main") {
+					// Skip all init() functions.  (We don't need to skip
+					// main.main() because rewriting "main" is an error higher up.)
+					if name == "init" {
 						return false
 					}
 
@@ -437,27 +441,6 @@ func copyFuncType(t *ast.FuncType) *ast.FuncType {
 		t2.Params.List[i] = &nField
 	}
 	return &t2
-}
-
-var RegisteredSymbols = interp.Exports{}
-
-// Register records the mappings of exported symbol names to their values
-// within the compiled executable.
-func Register(pkgName, ident string, val reflect.Value) {
-	if RegisteredSymbols[pkgName] == nil {
-		RegisteredSymbols[pkgName] = map[string]reflect.Value{}
-	}
-	RegisteredSymbols[pkgName][ident] = val
-}
-
-// RegisterAll invokes Register once for each symbol provided in the symbols
-// map.
-func RegisterAll(symbols interp.Exports) {
-	for pkg, pkgSyms := range symbols {
-		for pkgSym, value := range pkgSyms {
-			Register(pkg, pkgSym, value)
-		}
-	}
 }
 
 func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet, error) {
