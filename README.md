@@ -77,25 +77,31 @@ into this
 
 ```go
 func Foo(... args ...) (...return values...) {
-  return GRL_Foo(...args...)
+  return GRLf_Foo(...args...)
 }
 
-var GRL_Foo = func(...args...) (...return values...) {
+var GRLf_Foo = func(...args...) (...return values...) {
    // body
 }
 
-func GRL_SetFoo(f func(...Foo's signature)...) {
-  GRL_Foo = f
+func GRLset_Foo(f func(...Foo's signature)...) {
+  GRLf_Foo = f
 }
 ```
 
 and similarly for methods.
 
+Export all named private package-level variables, types, interfaces, and
+struct field names, by adding "GRL_" to the front.
+
+(None of this is done in-place, it's all performed on a temporary copy of the
+packages being filtered.  No original source code is changed.)
+
 ### We watch your source for changes at runtime
 
 When a filtered source file changes, it will be read, parsed, and changed
 functions will be installed with new versions of themselves via the generated
-`GRL_Set*` functions, via [Yaegi](https://github.com/traefik/yaegi), a Go
+`GRLset_*` functions, via [Yaegi](https://github.com/traefik/yaegi), a Go
 interpreter.
 
 ## Limitations
@@ -111,8 +117,8 @@ interpreter.
     - You cannot change function signatures.
     - You cannot redefine types (add/remove/change fields).
     - You cannot add new package-scope variables or constants during a reload (this should be easy to fix, just haven't gotten to it).
-    - You cannot gain new module dependencies during a reload.
-    - You cannot reload any symbols in the `main` package.
+    - You cannot gain new module dependencies during a reload.  That said, you _can_ import any package that your module _already_ imports transitively.  So if X imports Y and you only import X, then you can later import Y without issue.  You can also import any package in the standard library, which is already built-in to Yaegi.
+    - You cannot reload any symbols in the `main` package.  You can work around this by just copying your current `main` code to (for example) grl_main, exporting `main` as `Main`, and rewriting your real `main` to just call `grl_main.Main()`.  Eventually we'll teach the filter how to do this for you.  ([Issue 5](https://github.com/got-reload/got-reload/issues/5))
 
 ## Who came up with this hair-brained idea?
 

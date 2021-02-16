@@ -550,7 +550,7 @@ func filter(selfName string, args []string) {
 			log.Fatalf("Failed generating symbol registration for %s: %v", pkg.PkgPath, err)
 		}
 		fname := filepath.Join(path, "grl_"+strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(pkg.PkgPath)+".go")
-		log.Printf("Registrations for %s / %s -> %s", pkg.Name, pkg.PkgPath, fname)
+		// log.Printf("Registrations for %s / %s -> %s", pkg.Name, pkg.PkgPath, fname)
 		// log.Println(string(registrationSource))
 		ioutil.WriteFile(fname, registrationSource, 0644)
 	}
@@ -560,11 +560,11 @@ func allImportedPackages(m map[*packages.Package]int, pkg *packages.Package) {
 	if m[pkg] > 0 {
 		return
 	}
-	log.Printf("Getting imported packages for %s / %s", pkg.Name, pkg.PkgPath)
+	// log.Printf("Getting imported packages for %s / %s", pkg.Name, pkg.PkgPath)
 	for _, iPkg := range pkg.Imports {
 		if internalPkg(iPkg.PkgPath) || probablyStdLib(iPkg.PkgPath) {
 			if m[iPkg] == 0 {
-				log.Printf("Skipping %s", iPkg.PkgPath)
+				// log.Printf("Skipping %s", iPkg.PkgPath)
 				m[iPkg] = 1
 			}
 		} else {
