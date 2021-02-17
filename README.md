@@ -136,9 +136,9 @@ survive the fact that the CLI may change on a daily basis, then sure!
 
 ## Can I support the development of this tool?
 
-Yes! You can sponsor one of the two developers:
+Yes!  We appreciate stars, watchers, feedback, and, of course, pull requests!  A PR need not necessarily be code, of course; it could be documentation, or something else.  Whatever itch you care to scratch.
+
+You can also sponsor the developers:
 
 - Larry Clapp [@theclapp](https://github.com/sponsors/theclapp) 
 - Chris Waldon [@whereswaldon](https://github.com/sponsors/whereswaldon)
-
-We also appreciate stars, watchers, and feedback!
