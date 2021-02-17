@@ -147,7 +147,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 
 	if addPackage {
 		// Add a package prefix to all identifiers defined in this package
-		// (noted above).
+		// (noted above), aka "reload mode".
 		for _, file := range pkg.Syntax {
 			pre := func(c *astutil.Cursor) bool {
 				switch n := c.Node().(type) {
@@ -163,15 +163,14 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 			file = astutil.Apply(file, pre, nil).(*ast.File)
 		}
 	} else {
-		// Generate symbol registrations.  (Not needed if !addPackage, i.e., in
-		// reload mode.)
+		// Generate symbol registrations, aka "rewrite mode".
 		var setters []string
 		for setter := range r.NewFunc[pkg.PkgPath] {
 			setters = append(setters, setter)
 		}
 		registrationSource, err := extract.GenContent(pkg.Name, pkg.PkgPath, false, pkg.Types, setters, exported)
 		if err != nil {
-			return fmt.Errorf("Failed generating symbol registration for %s: %w", pkg.PkgPath, err)
+			return fmt.Errorf("Failed generating symbol registration for %s at %s: %w", pkg.Name, pkg.PkgPath, err)
 		}
 
 		// log.Printf("generated grl_register.go: %s", string(registrationSource))
@@ -338,6 +337,16 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 		}
 	}
 
+	// See if we need to add '...' to the end of the stub call.
+	var ellipsisPos token.Pos
+	if l := len(node.Type.Params.List); l > 0 {
+		if _, needsEllipsis := node.Type.Params.List[l-1].Type.(*ast.Ellipsis); needsEllipsis {
+			// Exact value doesn't matter (so far as I can tell), just needs to
+			// be non-zero.
+			ellipsisPos = 1
+		}
+	}
+
 	// Copy all formal arguments into the arglist of the function call
 	for i, argField := range node.Type.Params.List {
 		if len(argField.Names) == 0 {
@@ -358,8 +367,9 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 
 	// Define the new body of the function/method to just call the stub.
 	stubCall := &ast.CallExpr{
-		Fun:  newIdent(stubPrefix + name),
-		Args: newArgs,
+		Fun:      newIdent(stubPrefix + name),
+		Args:     newArgs,
+		Ellipsis: ellipsisPos,
 	}
 	var body *ast.BlockStmt
 	if node.Type.Results == nil {

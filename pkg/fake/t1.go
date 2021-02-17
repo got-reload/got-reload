@@ -2,4 +2,4 @@
 // exist on the real file system.
 package fake
 
-func you_shouldnt_see_this() {}
+func fake_t1__you_shouldnt_see_this() {}

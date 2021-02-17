@@ -6,10 +6,10 @@ import (
 	"go/ast"
 	"go/format"
 	"go/parser"
-	"go/token"
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -134,6 +134,11 @@ func (r T4) t4m2(int) int {
 func (T4) t4m3(a6 int) int {
 	return 0
 }
+
+// Variadic (use of "...") function
+func F3 (a, b, c int, i ...int) int {
+	return i[0]
+}
 `
 
 	testFile2 = `
@@ -154,34 +159,16 @@ type (
 	targetFile = `
 package target
 
-func GRL_f1(a1 int, a2, a3 GRL_t1, a4 T2) (int, GRL_t1, error) {
-	return GRLf_f1(a1, a2, a3, a4)
+func GRL_target_func(arg ...int) int {
+	return GRLf_target_func(arg...)
 }
 
-var GRLf_f1 = func(a1 int, a2, a3 GRL_t1, a4 T2) (int, GRL_t1, error) {
-	v1 = V2
-	v3 = V4
-	v8.t3f1 = V9.T3f2
-	var v11 t3
-	if v1 == V2 {
-		v11 = v1
-	}
-	if v1 == V2 {
-		v11 = v8.t3f1
-	}
-	return v1, v3, errors.New("an error")
+var GRLf_target_func = func(arg ...int) int {
+	return arg[0]
 }
 
-func GRLset_f1(f func(a1 int, a2, a3 GRL_t1, a4 T2) (int, GRL_t1, error)) {
-	GRLf_f1 = f
-}
-
-func Register(pkgName, ident string, val reflect.Value) {}
-
-var pkgName, ident string
-var val reflect.Value
-func init() { 
-	rewriter.Register("pkg_name_literal", "ident_literal", reflect.ValueOf(GRLset_f1)) 
+func GRLset_target_func(f func(arg ...int) int) {
+	GRLf_target_func = f
 }
 `
 )
@@ -204,20 +191,20 @@ func TestCompileParse(t *testing.T) {
 		r := &Rewriter{
 			Config: packages.Config{
 				// Logf: t.Logf,
-				// This is handy for knowing what is being parsed and by what name.
-				ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
-					// t.Logf("ParseFile: %s\n", filename)
-					return parser.ParseFile(fset, filename, src, 0)
-				},
+				// // This is handy for knowing what is being parsed and by what name.
+				// ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				// t.Logf("ParseFile: %s\n", filename)
+				// return parser.ParseFile(fset, filename, src, 0)
+				// },
 				// Replace the fake t1 & t2.go with our testfile data.
 				Overlay: map[string][]byte{
-					cwd + "/fake/t1.go": []byte(testFile1),
-					cwd + "/fake/t2.go": []byte(testFile2),
+					path.Dir(cwd) + "/fake/t1.go": []byte(testFile1),
+					path.Dir(cwd) + "/fake/t2.go": []byte(testFile2),
 				},
 			},
 		}
 
-		err = r.Load("./fake")
+		err = r.Load("../fake")
 
 		Convey("It should parse correctly", func() {
 			So(err, ShouldBeNil)
@@ -249,13 +236,13 @@ func TestCompileParse(t *testing.T) {
 								// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
 								// Printf("%s", buf.String())
 
-								// What should the rewritten f1 look like, ast-wise?
+								// What should the rewritten target_func() look like, ast-wise?
 								targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
 								So(err, ShouldBeNil)
 								So(targetNode, ShouldNotBeNil)
 								buf = bytes.Buffer{}
 								ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
-								Printf("%s", buf.String())
+								Printf("target: %s", buf.String())
 							}
 						}()
 
