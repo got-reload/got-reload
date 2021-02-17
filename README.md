@@ -120,7 +120,7 @@ interpreter.
     - You cannot gain new module dependencies during a reload.  That said, you _can_ import any package that your module _already_ imports transitively.  So if X imports Y and you only import X, then you can later import Y without issue.  You can also import any package in the standard library, which is already built-in to Yaegi.
     - You cannot reload any symbols in the `main` package.  You can work around this by just copying your current `main` code to (for example) grl_main, exporting `main` as `Main`, and rewriting your real `main` to just call `grl_main.Main()`.  Eventually we'll teach the filter how to do this for you.  ([Issue 5](https://github.com/got-reload/got-reload/issues/5))
 
-## Who came up with this hair-brained idea?
+## Who came up with this harebrained idea?
 
 - Larry Clapp [@theclapp](https://github.com/theclapp) 
 - Chris Waldon [@whereswaldon](https://github.com/whereswaldon)
