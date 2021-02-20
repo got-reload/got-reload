@@ -280,6 +280,13 @@ Flags:
 		log.Fatal("No hot-reload packages specified")
 	}
 
+	// TODO(whereswaldon):
+	// Procedure
+	// - create temporary directory
+	// - copy entire local module into temporary directory using dup.Copy
+	// - invoke filter command on that copy
+	// - invoke go run on the filtered codebase
+
 	os.Setenv(reloader.PackageListEnv, packages)
 	os.Setenv(reloader.StartReloaderEnv, "1")
 
@@ -302,6 +309,22 @@ Flags:
 		log.Printf("Unable to derive absolute path for %s, using relative path and hoping for the best: %v", os.Args[0], err)
 		absExecutable = os.Args[0]
 	}
+
+	var exitStatus int
+	defer func() {
+		os.Exit(exitStatus)
+	}()
+	dir, err := ioutil.TempDir("", "gotreload-*")
+	if err != nil {
+		log.Printf("failed creating temporary directory for source code rewrite: %v", err)
+		return
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			log.Printf("failed cleaning up temporary directory %s: %v", dir, err)
+			exitStatus = int(FailedCleanup)
+		}
+	}()
 
 	toolexecArgs := []string{absExecutable, subcommandToolexec, "-p", packages}
 	if keep {
