@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/got-reload/got-reload/pkg/dup"
 	"github.com/got-reload/got-reload/pkg/extract"
 	"github.com/got-reload/got-reload/pkg/gotreload"
 	"github.com/got-reload/got-reload/pkg/reloader"
@@ -117,7 +117,7 @@ const (
 
 var subcommands = map[string]func(selfName string, args []string){
 	// subcommandToolexec: toolexec,
-	// subcommandRun:      run,
+	subcommandRun:    run,
 	subcommandFilter: filter,
 }
 
@@ -250,8 +250,6 @@ func toolexec(selfName string, args []string) {
 }
 
 func run(selfName string, args []string) {
-	panic("run not supported")
-
 	var packages string
 	var verbose, keep bool
 	set := flag.NewFlagSet(selfName, flag.ExitOnError)
@@ -280,21 +278,6 @@ Flags:
 		log.Fatal("No hot-reload packages specified")
 	}
 
-	// TODO(whereswaldon):
-	// Procedure
-	// - create temporary directory
-	// - copy entire local module into temporary directory using dup.Copy
-	// - invoke filter command on that copy
-	// - invoke go run on the filtered codebase
-
-	os.Setenv(reloader.PackageListEnv, packages)
-	os.Setenv(reloader.StartReloaderEnv, "1")
-
-	deps, err := addDependencies(packageList)
-	if err != nil {
-		log.Fatalf("Error rewriting packages: %v", err)
-	}
-
 	// This is either "got-reload" or whatever executable "go run" builds.  (I
 	// mention this in part because if you search the source for "got-reload" I
 	// feel like you should find it, since we (might) run it here!)
@@ -310,44 +293,73 @@ Flags:
 		absExecutable = os.Args[0]
 	}
 
-	var exitStatus int
-	defer func() {
-		os.Exit(exitStatus)
-	}()
-	dir, err := ioutil.TempDir("", "gotreload-*")
+	// TODO(whereswaldon):
+	// Procedure
+	// - create temporary directory
+	workDir, err := ioutil.TempDir("", "gotreload-*")
 	if err != nil {
-		log.Printf("failed creating temporary directory for source code rewrite: %v", err)
-		return
+		log.Fatalf("Unable to create work directory: %v", err)
 	}
-	defer func() {
-		if err := os.RemoveAll(dir); err != nil {
-			log.Printf("failed cleaning up temporary directory %s: %v", dir, err)
-			exitStatus = int(FailedCleanup)
-		}
-	}()
+	// - copy entire local module into temporary directory using dup.Copy
+	path, err := goListSingle("-m", "-f", "{{.Dir}}")
+	if err != nil {
+		log.Fatalf("Unable to find module root: %v", err)
+	}
+	log.Printf("copying %s to %s", path, workDir)
+	if err := dup.Copy(workDir, os.DirFS(path)); err != nil {
+		log.Fatalf("Failed copying files to working dir: %v", err)
+	}
+	// - invoke filter command on that copy
+	cmdArgs := append([]string{"filter", "-dir", workDir}, packageList...)
+	if err := runWithIO(absExecutable, cmdArgs...); err != nil {
+		log.Fatalf("Failed rewriting code: %v", err)
+	}
+	// - invoke go run on the filtered codebase
+	os.Setenv(reloader.PackageListEnv, packages)
+	os.Setenv(reloader.StartReloaderEnv, "1")
+	paths, err := goListSingle("-f", "{{.Dir}} {{.ImportPath}}", runPackage)
+	if err != nil {
+		log.Fatalf("Could not resolve main package %s: %v", runPackage, err)
+	}
+	fsMainPath := strings.Fields(paths)[0]
+	mainPath := strings.Fields(paths)[1]
+	os.Setenv(reloader.SourceDirEnv, fsMainPath)
 
-	toolexecArgs := []string{absExecutable, subcommandToolexec, "-p", packages}
-	if keep {
-		toolexecArgs = append(toolexecArgs, "-keep")
-	}
-	toolexecArgs = append(toolexecArgs, argListDelimiter)
-	goArgs := []string{"run", "-toolexec", strings.Join(toolexecArgs, " ")}
-	if verbose {
-		goArgs = append(goArgs, "-v")
-	}
-	goArgs = append(goArgs, runPackage)
-	cmd := exec.CommandContext(context.TODO(), "go", goArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
-
-	// FIXME: do this even in the face of SIGINT / ^C.
-	if !keep {
-		for _, f := range deps {
-			os.Remove(f)
+	for _, v := range os.Environ() {
+		if strings.Contains(v, "GOT") {
+			log.Println(v)
 		}
 	}
+
+	if err := runWithIOIn(workDir, "go", "get", "./..."); err != nil {
+		log.Fatalf("Failed running go get ./...: %v", err)
+	}
+	if err := runWithIOIn(workDir, "go", "run", "-v", string(mainPath)); err != nil {
+		log.Fatalf("Failed running go run: %v", err)
+	}
+}
+
+func goListSingle(flags ...string) (string, error) {
+	args := append([]string{"list"}, flags...)
+	mainPath, err := exec.Command("go", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	out := strings.TrimSpace(string(mainPath))
+	return out, nil
+}
+
+func runWithIO(cmd string, args ...string) error {
+	return runWithIOIn("", cmd, args...)
+}
+
+func runWithIOIn(dir, cmd string, args ...string) error {
+	runCmd := exec.Command(cmd, args...)
+	runCmd.Dir = dir
+	runCmd.Stdin = os.Stdin
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+	return runCmd.Run()
 }
 
 func main() {
