@@ -331,6 +331,8 @@ Flags:
 		}
 	}
 
+	// rewriting can change the set of directly-imported symbols within the
+	// packages, so we need to update go.mod so that things still compile.
 	if err := runWithIOIn(workDir, "go", "get", "./..."); err != nil {
 		log.Fatalf("Failed running go get ./...: %v", err)
 	}
