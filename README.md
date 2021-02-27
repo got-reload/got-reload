@@ -10,35 +10,10 @@ of "usable."
 
 ## Do you have a demo?
 
-> Note: We intend to simplify the usage greatly from this form; bear with us!
-
-Clone this repo somewhere and do the following:
+Clone this repo somewhere and do the following within the repo's root directory:
 
 ```sh
-# define a directory for rewritten source code
-export GOT_RELOAD_TREE=$(mktemp -d)
-
-# define the packages we want to make reloadable
-export GOT_RELOAD_PKGS=$(echo github.com/got-reload/got-reload/demo/{example,example2} | tr ' ' ,)
-
-# define the location of our main package's source code
-export GOT_RELOAD_SOURCE_DIR=$(cd demo && pwd)
-
-# copy all of our files to our alternative tree to be rewritten
-tar -cf - * | tar -xf - -C "$GOT_RELOAD_TREE"
-
-# rewrite those files to be reloadable
-go run ./cmd/got-reload/ filter -dir "$GOT_RELOAD_TREE" $(echo "$GOT_RELOAD_PKGS" | tr , ' ')
-
-# signal the live reloader to activate when its init() function is called
-export GOT_RELOAD_START_RELOADER=1
-
-# go to our rewritten main package
-cd "$GOT_RELOAD_TREE/demo"
-
-# run our code
-go run -v .
-
+go run ./cmd/got-reload run -p github.com/got-reload/got-reload/demo/example ./demo/
 # press enter a few times to see the method get invoked and to watch the
 # package-level variable get incremented
 ```
@@ -49,7 +24,16 @@ just make it return a different constant.
 
 You should see the running program discover the changes and reload the definition
 of the function. Press enter a few more times to watch the return value change.
+
 Note how the package-level variable's state was not reset by the reload.
+
+You can also try our Gio-based GUI live editing demo:
+
+```sh
+go run ./cmd/got-reload run -p github.com/got-reload/got-reload/giodemo/reloadable ./giodemo/
+```
+
+Try altering the layout function defined in `./giodemo/reloadable/reloadable.go`. See the comments for ideas.
 
 ## Inspiration
 
