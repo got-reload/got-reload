@@ -12,10 +12,10 @@ import (
 )
 
 // Copy copies the entire filesystem described by src to the local filesystem
-// at the a path rooted at the string dest. Dest does not need to exist in
+// at the path rooted at the string dest. Dest does not need to exist in
 // advance. File permissions are not preserved by the copy.
 func Copy(dest string, src fs.FS) error {
-	walkFunc := func(path string, d fs.DirEntry, inErr error) (err error) {
+	walkFunc := func(path string, d fs.DirEntry, inErr error) (retErr error) {
 		destPath := filepath.Join(dest, path)
 		if d.IsDir() {
 			info, err := d.Info()
@@ -33,8 +33,8 @@ func Copy(dest string, src fs.FS) error {
 		}
 		defer func() {
 			if e := newFile.Close(); e != nil {
-				if err == nil {
-					err = fmt.Errorf("failed finalizing %s: %w", destPath, e)
+				if retErr == nil {
+					retErr = fmt.Errorf("failed finalizing %s: %w", destPath, e)
 				}
 			}
 		}()

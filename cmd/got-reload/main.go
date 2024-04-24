@@ -253,6 +253,7 @@ Where subcommand is one of: %v
 	}
 }
 
+// Not currently used
 func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName string, err error) {
 	// log.Printf("rewrite %s", targetFileName)
 
@@ -296,7 +297,7 @@ func writeTempFile(source []byte, targetFileName string) (string, error) {
 //
 // Not used.
 func addDependencies(packageList []string) ([]string, error) {
-	r := gotreload.Rewriter{}
+	r := gotreload.NewRewriter()
 	err := r.Load(packageList...)
 	if err != nil {
 		return nil, err
@@ -370,12 +371,12 @@ func filter(selfName string, args []string) {
 	}
 
 	log.Printf("Parsing package %v", packageList)
-	r := &gotreload.Rewriter{}
+	r := gotreload.NewRewriter()
 	err = r.Load(packageList...)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	err = r.Rewrite(false)
+	err = r.Rewrite(gotreload.ModeRewrite)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -438,7 +439,11 @@ func filter(selfName string, args []string) {
 			continue
 		}
 
-		registrationSource, err := extract.GenContent(pkg0.Name, pkg.Name, pkg.PkgPath, pkg.Types, nil, nil)
+		registrationSource, err := extract.GenContent(
+			pkg0.Name, pkg.Name, pkg.PkgPath, pkg.Types,
+			nil, nil,
+			//FIXME: needsAccessor, needsPublicType, needsPublicFuncWrapper
+			nil, nil, nil)
 		if err != nil {
 			log.Fatalf("Failed generating symbol registration for %s: %v", pkg.PkgPath, err)
 		}

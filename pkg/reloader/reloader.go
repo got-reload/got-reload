@@ -12,7 +12,6 @@ import (
 	lpkg "log"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -25,7 +24,6 @@ import (
 	"github.com/traefik/yaegi/stdlib"
 	"github.com/traefik/yaegi/stdlib/unrestricted"
 	"github.com/traefik/yaegi/stdlib/unsafe"
-	"golang.org/x/tools/go/packages"
 )
 
 const (
@@ -115,7 +113,7 @@ func StartWatching(list []string) <-chan string {
 	if err != nil {
 		log.Fatalf("Error parsing packages: %v", err)
 	}
-	err = r.Rewrite(true)
+	err = r.Rewrite(gotreload.ModeReload)
 	if err != nil {
 		log.Fatalf("Error rewriting packages: %s: %v", list, err)
 	}
@@ -167,6 +165,10 @@ func Start() {
 			log.Printf("Changed: %s", change)
 			mux.Lock()
 			changes[change] = true
+
+			// The AfterFunc is sort of a poor-man's "debounce" function. We
+			// accumulate changed files into "changes" and call the "afterfunc"
+			// after "dur" time has passed with no new changes.
 			if timer != nil {
 				timer.Stop()
 			}
@@ -176,12 +178,18 @@ func Start() {
 
 				for updated := range changes {
 					log.Printf("Reparsing due to %s", updated)
-					newR := gotreload.Rewriter{Config: packages.Config{Dir: os.Getenv(SourceDirEnv)}}
+					newR := gotreload.NewRewriter()
+					newR.Config.Dir = os.Getenv(SourceDirEnv)
+
+					// Load with file=<foo> loads the package that contains the
+					// given file.
 					err := newR.Load("file=" + updated)
 					if err != nil {
 						log.Fatalf("Error parsing package containing file %s: %v", change, err)
 					}
-					err = newR.Rewrite(true)
+
+					// Rewrite the package in "reload" mode
+					err = newR.Rewrite(gotreload.ModeReload)
 					if err != nil {
 						log.Fatalf("Error rewriting package for %s: %v", change, err)
 					}
@@ -208,90 +216,71 @@ func Start() {
 					for setter := range pkgSetters {
 						// log.Printf("Looking at setter & func %s", setter)
 
-						origDef, _, err := r.FuncDef(pkgPath, setter)
+						// Get a string version of the old function definition
+						origDef, err := r.FuncDef(pkgPath, setter)
 						if err != nil {
 							log.Printf("Error getting function definition of %s:%s: %v",
 								pkgPath, setter, err)
 							continue
 						}
-						newDef, imports, err := newR.FuncDef(pkgPath, setter)
+						// Get a string version of the new function definition
+						newDef, err := newR.FuncDef(pkgPath, setter)
 						if err != nil {
 							log.Printf("Error getting function definition of %s:%s: %v",
 								pkgPath, setter, err)
 							continue
 						}
+
 						if origDef == newDef {
+							// If they're the same, don't do anything
 							// log.Printf("Skip %s", setter)
+							continue
+						}
+						// log.Printf("Call %s: %s", setter, newDef)
+
+						// FIXME: use the same interpreter the whole time
+						i := interp.New(interp.Options{
+							GoPath: os.Getenv("GOPATH"),
+						})
+						err = i.Use(stdlib.Symbols)
+						if err != nil {
+							log.Printf("Error Using stdlib.Symbols")
+							break
+						}
+
+						err = i.Use(unsafe.Symbols)
+						if err != nil {
+							log.Printf("Error Using unsafe.Symbols")
+							break
+						}
+
+						err = i.Use(unrestricted.Symbols)
+						if err != nil {
+							log.Printf("Error Using unrestricted.Symbols")
+							break
+						}
+						// i.Use(interp.Symbols)
+						// log.Printf("Registered symbols: %v", RegisteredSymbols)
+						err = i.Use(RegisteredSymbols)
+						if err != nil {
+							log.Printf("Error Using RegisteredSymbols")
+							break
+						}
+
+						i.ImportUsed()
+
+						// This really should be just a raw assignment (not a
+						// function call), but stock Yaegi currently doesn't
+						// support that. I've got a bug report in flight.
+						eFunc := fmt.Sprintf(`%s.%s(%s)`, newPkg.Name, setter, newDef)
+
+						// log.Printf("Eval: %s", eFunc)
+						_, err = i.Eval(eFunc)
+						if err == nil {
+							log.Printf("Ran %s", setter)
 						} else {
-							// log.Printf("Call %s: %s", setter, newDef)
-
-							i := interp.New(interp.Options{
-								GoPath: os.Getenv("GOPATH"),
-							})
-							err := i.Use(stdlib.Symbols)
-							if err != nil {
-								log.Printf("Error Using stdlib.Symbols")
-								break
-							}
-
-							err = i.Use(unsafe.Symbols)
-							if err != nil {
-								log.Printf("Error Using unsafe.Symbols")
-								break
-							}
-
-							err = i.Use(unrestricted.Symbols)
-							if err != nil {
-								log.Printf("Error Using unrestricted.Symbols")
-								break
-							}
-							// i.Use(interp.Symbols)
-							// log.Printf("Registered symbols: %v", RegisteredSymbols)
-							err = i.Use(RegisteredSymbols)
-							if err != nil {
-								log.Printf("Error Using RegisteredSymbols")
-								break
-							}
-
-							i.ImportUsed()
-
-							// log.Printf("Symbols: %v", i.Symbols("github.com/got-reload/got-reload/demo/example"))
-							// for path := range i.Symbols("") {
-							// 	log.Printf("Import: %s", path)
-							// }
-							var importList []string
-							for name, impPath := range imports {
-								var impLine string
-								if name == path.Base(impPath) {
-									impLine = fmt.Sprintf("%q", impPath)
-								} else {
-									impLine = fmt.Sprintf("%s %q", name, impPath)
-								}
-								importList = append(importList, impLine)
-							}
-							impString := strings.Join(importList, "\n")
-							_ = impString
-							// 							eFunc := fmt.Sprintf(`
-							// package main
-							// import (
-							// %q
-							// %s
-							// )
-							// func main() {
-							//   %s.%s(%s)
-							// }
-							// `, pkgPath, impString, newPkg.Name, setter, newDef)
-
-							eFunc := fmt.Sprintf(`%s.%s(%s)`, newPkg.Name, setter, newDef)
-
-							// log.Printf("Eval: %s", eFunc)
-							_, err = i.Eval(eFunc)
-							if err == nil {
-								log.Printf("Ran %s", setter)
-							} else {
-								log.Printf("Eval: %s", eFunc)
-								log.Printf("Eval error: %v", err)
-							}
+							log.Printf("Eval: %s", eFunc)
+							log.Printf("Eval error: %v", err)
 						}
 					}
 

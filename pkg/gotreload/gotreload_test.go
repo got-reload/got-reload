@@ -9,13 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"regexp"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
-	"golang.org/x/tools/go/packages"
 )
 
-const cmdPath = "github.com/got-reload/hot-reload/cmd/hot-reload"
+const cmdPath = "github.com/got-reload/got-reload/cmd/got-reload"
 
 var (
 	testFile1 = `
@@ -158,16 +158,54 @@ type (
 	targetFile = `
 package target
 
-func GRL_target_func(arg ...int) int {
-	return GRLf_target_func(arg...)
+func target_func(arg ...int) int {
+	return GRLfvar_target_func(arg...)
 }
 
-var GRLf_target_func = func(arg ...int) int {
+var GRLfvar_target_func = func(arg ...int) int {
 	return arg[0]
 }
 
-func GRLset_target_func(f func(arg ...int) int) {
-	GRLf_target_func = f
+func GRLfvarset_target_func(f func(arg ...int) int) {
+	GRLfvar_target_func = f
+}
+
+type T10 struct {
+	unexported_var int
+}
+
+func (r T10) unexported_method() int {
+	return GRLfvar_unexported_method()
+}
+
+type t11 struct {
+	unexported_var int
+}
+
+var unexported_var int
+
+func GRLuset_unexported_var(v int) { unexported_var = v }
+func GRLuget_unexported_var() int { return unexported_var }
+
+type GRLt_t11 = t11
+
+func example() {
+	unexported_var = 1 // test set
+	if unexported_var == 0 { // test get
+	}
+
+	GRLuset_unexported_var(1) // test set
+	if GRLuget_unexported_var() == 0 { // test get
+	}
+
+	var v T10
+	v.unexported_var = 1
+	if v.unexported_var == 0 {}
+
+	v.GRLuset_unexported_var(1)
+	if v.GRLuget_unexported_var() == 0 {}
+
+	var v GRLt_t11
 }
 `
 )
@@ -187,20 +225,19 @@ func TestCompileParse(t *testing.T) {
 		// t.Logf("Getwd: %s, %v", cwd, err)
 
 		// Parse it
-		r := &Rewriter{
-			Config: packages.Config{
-				// Logf: t.Logf,
-				// // This is handy for knowing what is being parsed and by what name.
-				// ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
-				// t.Logf("ParseFile: %s\n", filename)
-				// return parser.ParseFile(fset, filename, src, 0)
-				// },
-				// Replace the fake t1 & t2.go with our testfile data.
-				Overlay: map[string][]byte{
-					path.Dir(cwd) + "/fake/t1.go": []byte(testFile1),
-					path.Dir(cwd) + "/fake/t2.go": []byte(testFile2),
-				},
-			},
+		r := NewRewriter()
+
+		// r.Config.Logf = t.Logf
+		// // This is handy for knowing what is being parsed and by what name.
+		// r.Config.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+		// 	t.Logf("ParseFile: %s\n", filename)
+		// 	return parser.ParseFile(fset, filename, src, 0)
+		// }
+
+		// Replace the fake t1 & t2.go with our testfile data.
+		r.Config.Overlay = map[string][]byte{
+			path.Dir(cwd) + "/fake/t1.go": []byte(testFile1),
+			path.Dir(cwd) + "/fake/t2.go": []byte(testFile2),
 		}
 
 		err = r.Load("../fake")
@@ -210,7 +247,7 @@ func TestCompileParse(t *testing.T) {
 			So(r.Pkgs, ShouldNotBeNil)
 
 			Convey("When rewritten", func() {
-				err = r.Rewrite(false)
+				err = r.Rewrite(ModeRewrite)
 
 				Convey("It should rewrite correctly", func() {
 					So(err, ShouldBeNil)
@@ -246,9 +283,34 @@ func TestCompileParse(t *testing.T) {
 						}()
 
 						types := getTypes(file)
-						So(types, ShouldContainKey, exportPrefix+"t1")
+						So(types, ShouldContainKey, "t1")
 						So(types, ShouldContainKey, "T2")
-						So(types, ShouldContainKey, exportPrefix+"t3")
+
+						So(r.Info[pkg], ShouldNotBeNil)
+						So(r.Info[pkg].Registrations, ShouldNotBeNil)
+
+						registrations := string(r.Info[pkg].Registrations)
+						// Change all multiple space runs with a single space
+						registrations = (regexp.MustCompile(` +`)).ReplaceAllLiteralString(registrations, " ")
+
+						So(registrations, ShouldContainSubstring, "type GRLt_t1 = t1")
+						So(registrations, ShouldNotContainSubstring, "T2 = T2")
+						So(registrations, ShouldContainSubstring, "type GRLt_t3 = t3")
+
+						So(registrations, ShouldContainSubstring, "func GRLuget_v1() int { return v1 }")
+						So(registrations, ShouldContainSubstring, "func GRLuset_v1(_GRLuset_var int) { v1 = _GRLuset_var }")
+
+						// So(registrations, ShouldContainSubstring, "var GRLfvar_f1 = f1")
+
+						So(registrations, ShouldContainSubstring, "func (r *t3) GRLfget_t3f1() int { return r.t3f1 }")
+						So(registrations, ShouldContainSubstring, "func (r *t3) GRLfset_t3f1(GRL_new_val int) { r.t3f1 = GRL_new_val }")
+
+						Printf("%s", string(r.Info[pkg].Registrations))
+
+						// So(1, ShouldEqual, 0)
+
+						return
+
 						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[0].Names[0].Name,
 							ShouldEqual, exportPrefix+"t3f1")
 						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[1].Names[0].Name,

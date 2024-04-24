@@ -9,9 +9,9 @@ import (
 	"go/types"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
-	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/got-reload/got-reload/pkg/extract"
 	"golang.org/x/tools/go/ast/astutil"
@@ -26,9 +26,14 @@ const (
 	// Used to generate argument names.
 	syntheticArgPrefix = "GRLarg_"
 	// Used for stub function variable names.
-	stubPrefix = "GRLf_"
+	stubPrefix = "GRLfvar_"
 	// Used for set functions.
-	setPrefix = "GRLset_"
+	setPrefix = "GRLfset_"
+
+	usetPrefix = "GRLuset_"
+	ugetPrefix = "GRLuget_"
+
+	utypePrefix = "GRLt_"
 )
 
 type (
@@ -51,19 +56,27 @@ type (
 	}
 )
 
-func (r *Rewriter) Load(paths ...string) error {
-	// Make sure the mode has at least what the parser needs
-	r.Config.Mode |= packages.NeedName |
-		packages.NeedFiles |
-		packages.NeedCompiledGoFiles |
-		packages.NeedImports |
-		packages.NeedDeps |
-		packages.NeedTypes |
-		packages.NeedSyntax |
-		packages.NeedTypesInfo
-	r.NewFunc = map[string]map[string]*ast.FuncLit{}
-	r.Info = map[*packages.Package]*Info{}
+func NewRewriter() *Rewriter {
+	r := Rewriter{
+		// Make sure the mode has at least what the parser needs
+		Config: packages.Config{
+			Mode: packages.NeedName |
+				packages.NeedFiles |
+				packages.NeedCompiledGoFiles |
+				packages.NeedImports |
+				packages.NeedDeps |
+				packages.NeedTypes |
+				packages.NeedSyntax |
+				packages.NeedTypesInfo,
+		},
+		NewFunc: map[string]map[string]*ast.FuncLit{},
+		Info:    map[*packages.Package]*Info{},
+	}
 
+	return &r
+}
+
+func (r *Rewriter) Load(paths ...string) error {
 	pkgs, err := packages.Load(&r.Config, paths...)
 	if err != nil {
 		return err
@@ -74,15 +87,23 @@ func (r *Rewriter) Load(paths ...string) error {
 	return nil
 }
 
-// Rewrite rewrites the ASTs in r.Pkgs in place.  addPackage==true is used in
-// reload mode, to add package prefixes to all mentioned variables.
-func (r *Rewriter) Rewrite(addPackage bool) error {
+type RewriteMode int
+
+const (
+	ModeInvalid = iota
+	ModeRewrite
+	ModeReload
+)
+
+// Rewrite rewrites the ASTs in r.Pkgs in place.  mode==ModeReload is used to
+// add package prefixes to all mentioned variables, and make other changes.
+func (r *Rewriter) Rewrite(mode RewriteMode) error {
 	for _, pkg := range r.Pkgs {
 		if pkg.TypesInfo == nil {
 			log.Printf("Pkg %s: No TypesInfo\n", pkg.Name)
 			continue
 		}
-		err := r.rewritePkg(pkg, addPackage)
+		err := r.rewritePkg(pkg, mode)
 		if err != nil {
 			return err
 		}
@@ -90,7 +111,7 @@ func (r *Rewriter) Rewrite(addPackage bool) error {
 	return nil
 }
 
-func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
+func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	if pkg.Name == "main" {
 		return fmt.Errorf("Cannot rewrite package \"main\"")
 	}
@@ -99,9 +120,17 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 	}
 	// log.Printf("Pkg: %#v", pkg)
 
+	// I *think* all this is only for "rewrite" mode, not "reload" mode.
 	exported := map[types.Object]bool{}
 	definedInThisPackage := map[types.Object]bool{}
 	funcs := map[*ast.FuncDecl]string{}
+	needsAccessor := map[string]string{}                                       // var name -> its type's name
+	needsFieldAccessor := map[string]map[*types.Struct]extract.FieldAccessor{} // field name -> rtype name -> stuff
+	_ = needsFieldAccessor
+	needsPublicMethodWrapper := map[string]bool{}
+	// needsPublicFuncWrapper := map[string]*types.Signature{}
+	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
+	needsPublicType := map[string]string{}
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
 			continue
@@ -111,46 +140,119 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 			switch obj := obj.(type) {
 			// Struct field names
 			case *types.Var:
-				if obj.IsField() {
-					assureExported(exported, ident, obj)
-				}
+			// 	if obj.IsField() {
+			// 		// assureExported(exported, ident, obj)
+			// 		if !obj.Exported() {
+			// 			needsFieldAccessor[ident.Name] = true
+			// 		}
+			// 	}
 			// Method names in interfaces.
 			case *types.Func:
-				assureExported(exported, ident, obj)
+				// assureExported(exported, ident, obj)
+				if !obj.Exported() {
+					// Probably not quite right? Need the type of the struct the
+					// field is in, and the type of the field.
+					needsPublicMethodWrapper[ident.Name] = true
+				}
 				tagForTranslation(pkg, funcs, obj)
 			default:
 				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
 			}
 			continue
 		}
+		// pretty sure this is moot
+		// switch obj := obj.(type) {
+		// case *types.TypeName:
+		// 	if typ, ok := obj.Type().(*types.Struct); ok {
+		// 		log.Printf("found obj %s in %v", obj.Name(), typ)
+		// 	}
+		// }
 		if obj.Parent() != pkg.Types.Scope() {
 			// Skip any item (variable, type, etc) not at package scope.
 			continue
 		}
-		assureExported(exported, ident, obj)
+		// assureExported(exported, ident, obj)
+		if !obj.Exported() {
+			switch obj := obj.(type) {
+			case *types.Var:
+				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
+				switch oType := obj.Type().(type) {
+				case *types.Basic:
+					needsAccessor[ident.Name] = oType.Name()
+				case *types.Named:
+					needsAccessor[ident.Name] = oType.Obj().Name()
+				default:
+					panic(fmt.Sprintf("Unknown var type (%s): %#v", ident.Name, obj.Type()))
+				}
+			case *types.TypeName:
+				needsPublicType[ident.Name] = utypePrefix + ident.Name
+			case *types.Func:
+				// needsPublicFuncWrapper[ident.Name] = obj.Type().(*types.Signature)
+				// needsPublicFuncWrapper[ident.Name] = stubPrefix + ident.Name
+			}
+		}
 		if obj, ok := obj.(*types.Func); ok {
 			tagForTranslation(pkg, funcs, obj)
 		}
 		definedInThisPackage[obj] = true
 	}
+	for _, name := range pkg.Types.Scope().Names() {
+		obj := pkg.Types.Scope().Lookup(name)
+		// log.Printf("Found obj %#v in type scope", obj)
+		if typeName, ok := obj.(*types.TypeName); ok {
+			// log.Printf("Found type name %s", typeName.Name())
+			if named, ok := typeName.Type().(*types.Named); ok {
+				// log.Printf("Found named type called %s, underlying %#v", typeName.Name(), named.Underlying())
+				if s, ok := named.Underlying().(*types.Struct); ok {
+					// log.Printf("Found struct type with %d fields", s.NumFields())
+					for i := 0; i < s.NumFields(); i++ {
+						field := s.Field(i)
+						if !field.Exported() {
+							var fieldTypeName string
+							switch oType := field.Type().(type) {
+							case *types.Basic:
+								fieldTypeName = oType.Name()
+							case *types.Named:
+								fieldTypeName = oType.Obj().Name()
+							default:
+								panic(fmt.Sprintf("Unknown var type (%s): %#v", field.Name(), obj.Type()))
+							}
+							if needsFieldAccessor[field.Name()] == nil {
+								needsFieldAccessor[field.Name()] = map[*types.Struct]extract.FieldAccessor{}
+							}
+							needsFieldAccessor[field.Name()][s] = extract.FieldAccessor{
+								Var:       field,
+								RType:     typeName.Name(),
+								GetName:   "GRLfget_" + field.Name(),
+								SetName:   "GRLfset_" + field.Name(),
+								FieldType: fieldTypeName,
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
+	// This is for both rewrite & reload modes.
 	r.stubTopLevelFuncs(pkg, funcs)
 
 	// Find all the uses of all the stuff we exported, and export them
-	// too.  If addPackage, tag idents defined in this package for adding the
-	// package to.
+	// too.  If mode == ModeReload, tag idents defined in this package for
+	// adding the package to.
 	addPackageIdent := map[*ast.Ident]bool{}
 	for ident, obj := range pkg.TypesInfo.Uses {
-		if exported[obj] {
-			ident.Name = exportPrefix + ident.Name
-		}
-		if addPackage && definedInThisPackage[obj] {
+		// if exported[obj] {
+		// 	ident.Name = exportPrefix + ident.Name
+		// }
+		if mode == ModeReload && definedInThisPackage[obj] {
 			// log.Printf("Add package to %s", ident.Name)
 			addPackageIdent[ident] = true
 		}
 	}
 
-	if addPackage {
+	switch mode {
+	case ModeReload:
 		// Add a package prefix to all identifiers defined in this package
 		// (noted above), aka "reload mode".
 		for _, file := range pkg.Syntax {
@@ -167,13 +269,14 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 			}
 			file = astutil.Apply(file, pre, nil).(*ast.File)
 		}
-	} else {
+	case ModeRewrite:
 		// Generate symbol registrations, aka "rewrite mode".
 		var setters []string
 		for setter := range r.NewFunc[pkg.PkgPath] {
 			setters = append(setters, setter)
 		}
-		registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, setters, exported)
+		registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, setters, exported,
+			needsAccessor, needsPublicType, needsFieldAccessor)
 		if err != nil {
 			return fmt.Errorf("Failed generating symbol registration for %s at %s: %w", pkg.Name, pkg.PkgPath, err)
 		}
@@ -182,6 +285,8 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 			// log.Printf("generated grl_register.go: %s", string(registrationSource))
 			r.Info[pkg] = &Info{Registrations: registrationSource}
 		}
+	default:
+		panic(fmt.Sprintf("Unknown mode: %d", mode))
 	}
 
 	// b := bytes.Buffer{}
@@ -191,6 +296,11 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 	// }
 	// log.Printf("Updated file: %s", b.String())
 	return nil
+}
+
+func makeExported(s string) string {
+	r, sz := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[sz:]
 }
 
 // assureExported takes unexported identifiers, adds a prefix to export them,
@@ -207,44 +317,53 @@ func assureExported(exported map[types.Object]bool, ident *ast.Ident, obj types.
 // it for translation.
 func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, obj *types.Func) {
 	// log.Printf("Func: %#v\n", obj)
-	for _, file := range pkg.Syntax {
-		filename := pkg.Fset.Position(file.Pos()).Filename
-		objFileName := pkg.Fset.Position(obj.Pos()).Filename
-		// log.Printf("Looking at %q vs. %q", filename, objFileName)
-		if filename == objFileName {
-			path, exact := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
-			// log.Printf("func %s: exact: %v, %#v\n", obj.Name(), exact, path)
+	file := findFile(pkg, obj)
+	if file == nil {
+		log.Printf("Warning: Cannot find file for %s\n", obj.Name())
+		return
+	}
 
-			if path != nil && exact {
-				var funcDecl *ast.FuncDecl
-				var ok bool
-				for _, item := range path {
-					// position := pkg.Fset.Position(item.Pos())
-					funcDecl, ok = item.(*ast.FuncDecl)
-					if ok {
-						// log.Printf("func %s: marking for translation\n", obj.Name())
-						funcs[funcDecl] = obj.Name()
-						// log.Printf("Tagging %s for translation", obj.Name())
-						// log.Printf("Found FuncDecl for %s: %s, %d:%d\n",
-						// 	obj.Name(), filename, position.Line, position.Column)
-						return
-					}
-					// log.Printf("Did not find FuncDecl for %s: %s, %d:%d\n",
-					// 	obj.Name(), filename, position.Line, position.Column)
-				}
-				// Not (necessarily) a fatal error?
-				log.Printf("Cannot find FuncDecl for %s\n", obj.FullName())
-			} else {
-				log.Printf("Cannot find exact path for %s\n", obj.Name())
-			}
+	astNodePath, exact := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
+	// log.Printf("func %s: exact: %v, %#v\n", obj.Name(), exact, path)
+
+	if astNodePath == nil || !exact {
+		log.Printf("Warning: Cannot find exact path for %s\n", obj.Name())
+		return
+	}
+
+	var funcDecl *ast.FuncDecl
+	var ok bool
+	for _, node := range astNodePath {
+		// position := pkg.Fset.Position(item.Pos())
+		funcDecl, ok = node.(*ast.FuncDecl)
+		if ok {
+			// log.Printf("func %s: marking for translation\n", obj.Name())
+			funcs[funcDecl] = obj.Name()
+			// log.Printf("Tagging %s for translation", obj.Name())
+			// log.Printf("Found FuncDecl for %s: %s, %d:%d\n",
+			// 	obj.Name(), filename, position.Line, position.Column)
 			return
 		}
+		// log.Printf("Did not find FuncDecl for %s: %s, %d:%d\n",
+		// 	obj.Name(), filename, position.Line, position.Column)
 	}
-	log.Printf("Cannot find file for %s\n", obj.Name())
+	// Not (necessarily) a fatal error?
+	log.Printf("Warning: Cannot find FuncDecl for %s\n", obj.FullName())
+}
+
+func findFile(pkg *packages.Package, obj *types.Func) *ast.File {
+	objFileName := pkg.Fset.Position(obj.Pos()).Filename
+	for _, file := range pkg.Syntax {
+		if objFileName == pkg.Fset.Position(file.Pos()).Filename {
+			return file
+		}
+	}
+	return nil
 }
 
 // stubTopLevelFuncs finds all the top-level functions and methods and stubs
-// them out.
+// them out. It also saves a pointer to the syntax tree of the function
+// literal, for later use.
 func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncDecl]string) {
 	for _, file := range pkg.Syntax {
 		pre := func(c *astutil.Cursor) bool {
@@ -257,7 +376,7 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 						return false
 					}
 
-					log.Printf("Translating %s\n", name)
+					// log.Printf("Translating %s\n", name)
 
 					newVar, setFunc := rewriteFunc(pkg.PkgPath, name, n)
 					if newVar != nil && setFunc != nil {
@@ -488,62 +607,14 @@ func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet,
 	return nil, nil, fmt.Errorf("File %s not found in parsed files", targetFileName)
 }
 
-func (r *Rewriter) FuncDef(pkgPath, setter string) (string, map[string]string, error) {
+func (r *Rewriter) FuncDef(pkgPath, setter string) (string, error) {
 	for _, pkg := range r.Pkgs {
 		if pkg.PkgPath != pkgPath {
 			continue
 		}
-		funcAst := r.NewFunc[pkgPath][setter]
-
-		// log.Printf("Setter %s ast\n", setter)
-		// ast.Print(pkg.Fset, funcAst)
-
-		// Find the file this function is in
-		fName := pkg.Fset.Position(funcAst.Pos()).Filename
-		file, _, err := r.LookupFile(fName)
-		if err != nil {
-			return "", nil, err
-		}
-
-		// Build a map of import names & paths that this file imports.
-		imports := map[string]string{}
-		usedImports := map[string]string{}
-		for _, imp := range file.Imports {
-			impPath := strings.Trim(imp.Path.Value, "\"")
-			name := path.Base(impPath)
-			if imp.Name != nil {
-				name = imp.Name.Name
-			}
-			imports[name] = impPath
-
-			// Mark all dot-imports as used.  Because we won't know, do we?
-			if name == "." {
-				usedImports["."] = impPath
-			}
-		}
-		// log.Printf("File %s imports %#v", fName, imports)
-
-		// Traverse the function's AST and find all SelectorExprs that look like
-		// package references.  FIXME: This will probably break if somebody
-		// shadows a package name (sigh).
-		pre := func(c *astutil.Cursor) bool {
-			switch n := c.Node().(type) {
-			case *ast.SelectorExpr:
-				if x, ok := n.X.(*ast.Ident); ok {
-					// log.Printf("Looking at selector %#v", x.Name)
-					if impPath, ok := imports[x.Name]; ok {
-						usedImports[x.Name] = impPath
-					}
-				}
-			}
-			return true
-		}
-		_ = astutil.Apply(funcAst, pre, nil)
-		// log.Printf("Setter %s uses %v", setter, usedImports)
-
 		b := &bytes.Buffer{}
 		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][setter])
-		return b.String(), usedImports, nil
+		return b.String(), nil
 	}
-	return "", nil, fmt.Errorf("No setter found for %s:%s", pkgPath, setter)
+	return "", fmt.Errorf("No setter found for %s:%s", pkgPath, setter)
 }

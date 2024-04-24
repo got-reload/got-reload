@@ -92,7 +92,28 @@ func init() {
 		}
 	{{end}}
 {{end}}
+
+{{range $var, $type := .NeedsAccessor -}}
+func GRLuget_{{$var}}() {{$type}} { return {{$var}} }
+func GRLuset_{{$var}}(_GRLuset_var {{$type}}) { {{$var}} = _GRLuset_var }
+{{end}}
+
+{{range $key, $type := .NeedsPublicType -}}
+type {{$type}} = {{$key}}
+{{end}}
+
+{{range $name, $s := .NeedsFieldAccessor -}}
+{{range $type, $thing := $s -}}
+func (r *{{$thing.RType}}) {{$thing.GetName}}() {{$thing.FieldType}} { return r.{{$name}} }
+func (r *{{$thing.RType}}) {{$thing.SetName}}(GRL_new_val {{$thing.FieldType}}) { r.{{$name}} = GRL_new_val }
+{{end}}
+{{end}}
 `
+
+// May want this back
+// {{range $name, $wrapper := .NeedsPublicFuncWrapper -}}
+// var {{$wrapper}} = {{$name}}
+// {{end}}
 
 // Val stores the value name and addressable status of symbols.
 type Val struct {
@@ -109,6 +130,14 @@ type Method struct {
 type Wrap struct {
 	Name   string
 	Method []Method
+}
+
+type FieldAccessor struct {
+	*types.Var
+	RType     string // receiver name
+	GetName   string // getter name
+	SetName   string // setter name
+	FieldType string // name of type of field
 }
 
 // restricted map defines symbols for which a special implementation is provided.
@@ -132,7 +161,16 @@ func matchList(name string, list []string) (match bool, err error) {
 	return
 }
 
-func GenContent(destPkg, basePkgName, importPath string, p *types.Package, setFuncs []string, exported map[types.Object]bool) ([]byte, error) {
+func GenContent(
+	destPkg, basePkgName, importPath string,
+	p *types.Package,
+	setFuncs []string,
+	exported map[types.Object]bool,
+	needsAccessor map[string]string,
+	needsPublicType map[string]string,
+	// needsPublicFuncWrapper map[string]string,
+	needsFieldAccessor map[string]map[*types.Struct]FieldAccessor, // field name -> rtype name -> stuff
+) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
 
@@ -334,13 +372,17 @@ func GenContent(destPkg, basePkgName, importPath string, p *types.Package, setFu
 	b := new(bytes.Buffer)
 	// log.Printf("GenContent: ImportPath: %s", importPath)
 	data := map[string]interface{}{
-		"Dest":       destPkg,
-		"Imports":    imports,
-		"ImportPath": importPath + "/" + pkgName,
-		"Val":        val,
-		"Typ":        typ,
-		"Wrap":       wrap,
-		"BuildTags":  buildTags,
+		"Dest":            destPkg,
+		"Imports":         imports,
+		"ImportPath":      importPath + "/" + pkgName,
+		"Val":             val,
+		"Typ":             typ,
+		"Wrap":            wrap,
+		"BuildTags":       buildTags,
+		"NeedsAccessor":   needsAccessor,
+		"NeedsPublicType": needsPublicType,
+		// "NeedsPublicFuncWrapper": needsPublicFuncWrapper,
+		"NeedsFieldAccessor": needsFieldAccessor,
 	}
 	err = parse.Execute(b, data)
 	if err != nil {
