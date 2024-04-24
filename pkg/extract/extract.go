@@ -16,9 +16,11 @@ import (
 	"go/constant"
 	"go/format"
 	"go/types"
+	"log"
 	"math/big"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -36,9 +38,6 @@ import (
 	"{{$key}}"
 	{{- end}}
 {{- end}}
-{{- if .ImportSelf}}
-	"{{.PkgName}}"
-{{- end}}
 	"reflect"
 	"github.com/got-reload/got-reload/pkg/reloader"
 	_ "github.com/got-reload/got-reload/pkg/reloader/start"
@@ -46,7 +45,7 @@ import (
 
 func init() {
 	reloader.RegisterAll(map[string]map[string]reflect.Value{
-    	                  "{{.PkgName}}": {
+    	"{{.ImportPath}}": {
 		{{- if .Val}}
 		// function, constant and variable definitions
 		{{range $key, $value := .Val -}}
@@ -77,12 +76,20 @@ func init() {
 {{range $key, $value := .Wrap -}}
 	// {{$value.Name}} is an interface wrapper for {{$key}} type
 	type {{$value.Name}} struct {
+		IValue interface{}
 		{{range $m := $value.Method -}}
 		W{{$m.Name}} func{{$m.Param}} {{$m.Result}}
 		{{end}}
 	}
 	{{range $m := $value.Method -}}
-		func (W {{$value.Name}}) {{$m.Name}}{{$m.Param}} {{$m.Result}} { {{$m.Ret}} W.W{{$m.Name}}{{$m.Arg}} }
+		func (W {{$value.Name}}) {{$m.Name}}{{$m.Param}} {{$m.Result}} {
+			{{- if eq $m.Name "String" }}
+			if W.WString == nil {
+				return ""
+			}
+			{{end -}}
+			{{$m.Ret}} W.W{{$m.Name}}{{$m.Arg}}
+		}
 	{{end}}
 {{end}}
 `
@@ -125,7 +132,7 @@ func matchList(name string, list []string) (match bool, err error) {
 	return
 }
 
-func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, setFuncs []string, exported map[types.Object]bool) ([]byte, error) {
+func GenContent(destPkg, basePkgName, importPath string, p *types.Package, setFuncs []string, exported map[types.Object]bool) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
 
@@ -135,7 +142,22 @@ func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, s
 	imports := map[string]bool{}
 	sc := p.Scope()
 
+	// pkgSeen := map[string]string{}
+	// pkgSeen[basePkgName] = importPath
+	// pkgDup := map[string]bool{}
+	importPathName := filepath.Base(importPath)
 	for _, pkg := range p.Imports() {
+		if pkg.Name() == importPathName {
+			log.Printf("Duplicate pkg names: %s, %s: %s, %s", destPkg, importPath, pkg.Name(), pkg.Path())
+			return nil, nil
+		}
+
+		// if prev, ok := pkgSeen[pkg.Name()]; ok {
+		// 	log.Printf("Duplicate pkg names: %s, %s: %s, %s; prev: %s", destPkg, importPath, pkg.Name(), pkg.Path(), prev)
+		// 	pkgDup[destPkg] = true
+		// 	// return nil, nil
+		// }
+		// pkgSeen[pkg.Name()] = pkg.Path()
 		imports[pkg.Path()] = false
 	}
 	qualify := func(pkg *types.Package) string {
@@ -154,10 +176,13 @@ func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, s
 			continue
 		}
 
-		pname := name
-		if importSelf {
-			pname = path.Base(importPath) + "." + name
+		pkgPrefix := ""
+		if pkgName := o.Pkg().Name(); destPkg != pkgName {
+			imports[importPath] = true
+			pkgPrefix = pkgName + "."
 		}
+
+		pname := name
 		// LMC: Not sure what this is all about.  We don't import the package
 		// that provides the custom implementation.
 		// if rname := path.Base(importPath) + name; restricted[rname] {
@@ -169,17 +194,32 @@ func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, s
 		case *types.Const:
 			if b, ok := o.Type().(*types.Basic); ok && (b.Info()&types.IsUntyped) != 0 {
 				// Convert untyped constant to right type to avoid overflow.
-				val[name] = Val{fixConst(pname, o.Val(), imports), false}
+				val[name] = Val{fixConst(pkgPrefix+pname, o.Val(), imports), false}
 			} else {
-				val[name] = Val{pname, false}
+				val[name] = Val{pkgPrefix + pname, false}
 			}
 		case *types.Func:
-			val[name] = Val{pname, false}
+			// Skip generic functions and methods.
+			if s := o.Type().(*types.Signature); s.TypeParams().Len() > 0 || s.RecvTypeParams().Len() > 0 {
+				continue
+			}
+			val[name] = Val{pkgPrefix + pname, false}
 		case *types.Var:
-			val[name] = Val{pname, true}
+			val[name] = Val{pkgPrefix + pname, true}
 		case *types.TypeName:
-			typ[name] = pname
+			// Skip type if it is generic.
+			if t, ok := o.Type().(*types.Named); ok && t.TypeParams().Len() > 0 {
+				continue
+			}
+			typ[name] = pkgPrefix + pname
 			if t, ok := o.Type().Underlying().(*types.Interface); ok {
+				if t.NumMethods() == 0 && t.NumEmbeddeds() != 0 {
+					// Skip interfaces used to implement constraints for generics.
+					delete(typ, name)
+					continue
+				}
+				// log.Printf("type %s: %s: Underlying: %T, t.Underlying: %T",
+				// 	name, typ[name], o.Type().Underlying(), t.Underlying())
 				var methods []Method
 				for i := 0; i < t.NumMethods(); i++ {
 					f := t.Method(i)
@@ -195,7 +235,31 @@ func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, s
 						if args[j] = v.Name(); args[j] == "" {
 							args[j] = fmt.Sprintf("a%d", j)
 						}
-						params[j] = args[j] + " " + types.TypeString(v.Type(), qualify)
+						// process interface method variadic parameter
+						if sign.Variadic() && j == len(args)-1 { // check is last arg
+							// only replace the first "[]" to "..."
+							at := types.TypeString(v.Type(), qualify)[2:]
+							params[j] = args[j] + " ..." + at
+							args[j] += "..."
+						} else {
+							if n, ok := v.Type().(*types.Named); ok {
+								// log.Printf("method arg %d type %T: %s, %s", j, v.Type(), types.TypeString(v.Type(), qualify),
+								// 	n.Obj().Pkg().Path())
+
+								// If a method type is "internal", skip the method,
+								// and don't import the type's package.
+								if strings.Contains(n.Obj().Pkg().Path(), "/internal/") {
+									log.Printf("Internal path: %s", n.Obj().Pkg().Path())
+									imports[n.Obj().Pkg().Path()] = false
+									return nil, nil
+									// continue NAME
+								}
+
+							} else {
+								// log.Printf("method arg %d type %T: %s", j, v.Type(), types.TypeString(v.Type(), qualify))
+							}
+							params[j] = args[j] + " " + types.TypeString(v.Type(), qualify)
+						}
 					}
 					arg := "(" + strings.Join(args, ", ") + ")"
 					param := "(" + strings.Join(params, ", ") + ")"
@@ -215,9 +279,17 @@ func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, s
 					methods = append(methods, Method{f.Name(), param, result, arg, ret})
 				}
 				wrap[name] = Wrap{prefix + name, methods}
+			} else {
+				// log.Printf("type %s: %s: Underlying: %T", name, typ[name], o.Type().Underlying())
 			}
 		}
 	}
+
+	if len(val) == 0 && len(typ) == 0 {
+		log.Printf("No vals or types: %s, %s", destPkg, importPath)
+		return nil, nil
+	}
+
 	// Create a val slot for all the generated setter functions (GRLset_XXX),
 	// just like *types.Func above.
 	for _, name := range setFuncs {
@@ -258,13 +330,13 @@ func GenContent(destPkg, importPath string, importSelf bool, p *types.Package, s
 		}
 	}
 
+	_, pkgName := path.Split(importPath)
 	b := new(bytes.Buffer)
+	// log.Printf("GenContent: ImportPath: %s", importPath)
 	data := map[string]interface{}{
-		"Dest":    destPkg,
-		"Imports": imports,
-		// "PkgName":   p.Name(),
-		"ImportSelf": importSelf,
-		"PkgName":    importPath,
+		"Dest":       destPkg,
+		"Imports":    imports,
+		"ImportPath": importPath + "/" + pkgName,
 		"Val":        val,
 		"Typ":        typ,
 		"Wrap":       wrap,

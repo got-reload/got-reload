@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/format"
 	"go/parser"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -223,7 +222,7 @@ func TestCompileParse(t *testing.T) {
 
 						// Do some diagnostics (maybe) even if tests fail.
 						defer func() {
-							if false {
+							if true {
 								// General diagnostics.
 								var buf bytes.Buffer
 
@@ -328,7 +327,7 @@ func _TestFirstCompile(t *testing.T) {
 	// 	t.Fatalf("Failed to get source filter binary: %v", err)
 	// }
 	// Define the file.
-	file, err := ioutil.TempFile("", "hotreload-*.go")
+	file, err := os.CreateTemp("", "hotreload-*.go")
 	if err != nil {
 		t.Fatalf("Failed to create temporary source code file: %v", err)
 	}

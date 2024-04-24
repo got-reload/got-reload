@@ -24,6 +24,7 @@ import (
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
 	"github.com/traefik/yaegi/stdlib/unrestricted"
+	"github.com/traefik/yaegi/stdlib/unsafe"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -52,6 +53,10 @@ var RegisteredSymbols = interp.Exports{}
 // Register records the mappings of exported symbol names to their values
 // within the compiled executable.
 func Register(pkgName, ident string, val reflect.Value) {
+	// log.Printf("Register %s.%s", pkgName, ident)
+	// baseName := path.Base(pkgName)
+	// log.Printf("Register %s.%s as package %s", pkgName, ident, baseName)
+	// pkgName = baseName
 	if RegisteredSymbols[pkgName] == nil {
 		RegisteredSymbols[pkgName] = map[string]reflect.Value{}
 	}
@@ -61,7 +66,9 @@ func Register(pkgName, ident string, val reflect.Value) {
 // RegisterAll invokes Register once for each symbol provided in the symbols
 // map.
 func RegisterAll(symbols interp.Exports) {
+	// log.Printf("RegisterAll called on %d packages", len(symbols))
 	for pkg, pkgSyms := range symbols {
+		// log.Printf("RegisterAll: %s", pkg)
 		for pkgSym, value := range pkgSyms {
 			Register(pkg, pkgSym, value)
 		}
@@ -113,7 +120,7 @@ func StartWatching(list []string) <-chan string {
 		log.Fatalf("Error rewriting packages: %s: %v", list, err)
 	}
 
-	// log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
+	log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
 	out := make(chan string)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -146,10 +153,12 @@ func StartWatching(list []string) <-chan string {
 
 func Start() {
 	log.Println("Starting reloader")
-	// log.Printf("Registered symbols: %v", RegisteredSymbols)
 	changesCh := StartWatching(WatchedPkgs)
 	const dur = 100 * time.Millisecond
 	go func() {
+		// time.Sleep(5 * time.Second) // give the other init() functions time to register all the symbols
+		// log.Printf("Registered symbols: %v", RegisteredSymbols)
+
 		var timer *time.Timer
 		mux := sync.Mutex{}
 		changes := map[string]bool{}
@@ -216,11 +225,40 @@ func Start() {
 						} else {
 							// log.Printf("Call %s: %s", setter, newDef)
 
-							i := interp.New(interp.Options{})
-							i.Use(stdlib.Symbols)
-							i.Use(unrestricted.Symbols)
+							i := interp.New(interp.Options{
+								GoPath: os.Getenv("GOPATH"),
+							})
+							err := i.Use(stdlib.Symbols)
+							if err != nil {
+								log.Printf("Error Using stdlib.Symbols")
+								break
+							}
+
+							err = i.Use(unsafe.Symbols)
+							if err != nil {
+								log.Printf("Error Using unsafe.Symbols")
+								break
+							}
+
+							err = i.Use(unrestricted.Symbols)
+							if err != nil {
+								log.Printf("Error Using unrestricted.Symbols")
+								break
+							}
 							// i.Use(interp.Symbols)
-							i.Use(RegisteredSymbols)
+							// log.Printf("Registered symbols: %v", RegisteredSymbols)
+							err = i.Use(RegisteredSymbols)
+							if err != nil {
+								log.Printf("Error Using RegisteredSymbols")
+								break
+							}
+
+							i.ImportUsed()
+
+							// log.Printf("Symbols: %v", i.Symbols("github.com/got-reload/got-reload/demo/example"))
+							// for path := range i.Symbols("") {
+							// 	log.Printf("Import: %s", path)
+							// }
 							var importList []string
 							for name, impPath := range imports {
 								var impLine string
@@ -232,19 +270,22 @@ func Start() {
 								importList = append(importList, impLine)
 							}
 							impString := strings.Join(importList, "\n")
-							eFunc := fmt.Sprintf(`
-package main
-import (
-%q
-%s
-)
-func main() {
-	%s.%s(%s)
-}
-`, pkgPath, impString, newPkg.Name, setter, newDef)
+							_ = impString
+							// 							eFunc := fmt.Sprintf(`
+							// package main
+							// import (
+							// %q
+							// %s
+							// )
+							// func main() {
+							//   %s.%s(%s)
+							// }
+							// `, pkgPath, impString, newPkg.Name, setter, newDef)
+
+							eFunc := fmt.Sprintf(`%s.%s(%s)`, newPkg.Name, setter, newDef)
 
 							// log.Printf("Eval: %s", eFunc)
-							_, err := i.Eval(eFunc)
+							_, err = i.Eval(eFunc)
 							if err == nil {
 								log.Printf("Ran %s", setter)
 							} else {

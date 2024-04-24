@@ -7,8 +7,8 @@ import (
 	"go/format"
 	"go/token"
 	"go/types"
-	"io/ioutil"
 	"log"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -68,6 +68,7 @@ func (r *Rewriter) Load(paths ...string) error {
 	if err != nil {
 		return err
 	}
+	packages.PrintErrors(pkgs)
 	r.Pkgs = pkgs
 
 	return nil
@@ -93,6 +94,10 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 	if pkg.Name == "main" {
 		return fmt.Errorf("Cannot rewrite package \"main\"")
 	}
+	if pkg.Name == "" {
+		return fmt.Errorf("Missing package name: %s %s", pkg.ID, pkg.PkgPath)
+	}
+	// log.Printf("Pkg: %#v", pkg)
 
 	exported := map[types.Object]bool{}
 	definedInThisPackage := map[types.Object]bool{}
@@ -168,13 +173,15 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 		for setter := range r.NewFunc[pkg.PkgPath] {
 			setters = append(setters, setter)
 		}
-		registrationSource, err := extract.GenContent(pkg.Name, pkg.PkgPath, false, pkg.Types, setters, exported)
+		registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, setters, exported)
 		if err != nil {
 			return fmt.Errorf("Failed generating symbol registration for %s at %s: %w", pkg.Name, pkg.PkgPath, err)
 		}
 
-		// log.Printf("generated grl_register.go: %s", string(registrationSource))
-		r.Info[pkg] = &Info{Registrations: registrationSource}
+		if registrationSource != nil {
+			// log.Printf("generated grl_register.go: %s", string(registrationSource))
+			r.Info[pkg] = &Info{Registrations: registrationSource}
+		}
 	}
 
 	// b := bytes.Buffer{}
@@ -212,15 +219,21 @@ func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, ob
 				var funcDecl *ast.FuncDecl
 				var ok bool
 				for _, item := range path {
+					// position := pkg.Fset.Position(item.Pos())
 					funcDecl, ok = item.(*ast.FuncDecl)
 					if ok {
 						// log.Printf("func %s: marking for translation\n", obj.Name())
 						funcs[funcDecl] = obj.Name()
 						// log.Printf("Tagging %s for translation", obj.Name())
+						// log.Printf("Found FuncDecl for %s: %s, %d:%d\n",
+						// 	obj.Name(), filename, position.Line, position.Column)
 						return
 					}
+					// log.Printf("Did not find FuncDecl for %s: %s, %d:%d\n",
+					// 	obj.Name(), filename, position.Line, position.Column)
 				}
-				log.Printf("Cannot find FuncDecl for %s\n", obj.Name())
+				// Not (necessarily) a fatal error?
+				log.Printf("Cannot find FuncDecl for %s\n", obj.FullName())
 			} else {
 				log.Printf("Cannot find exact path for %s\n", obj.Name())
 			}
@@ -238,27 +251,29 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 			switch n := c.Node().(type) {
 			case *ast.FuncDecl:
 				if name, ok := funcs[n]; ok {
-					// log.Printf("Translating %s\n", name)
-
 					// Skip all init() functions.  (We don't need to skip
 					// main.main() because rewriting "main" is an error higher up.)
 					if name == "init" {
 						return false
 					}
 
-					newVar, setFunc := rewriteFunc(pkg.PkgPath, name, n)
-					// These are like a stack, so in the emitted source, the
-					// current func will come first, then newVar, then setFunc.
-					c.InsertAfter(setFunc)
-					c.InsertAfter(newVar)
+					log.Printf("Translating %s\n", name)
 
-					// Track setFunc => newVar
-					if r.NewFunc[pkg.PkgPath] == nil {
-						r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
+					newVar, setFunc := rewriteFunc(pkg.PkgPath, name, n)
+					if newVar != nil && setFunc != nil {
+						// These are like a stack, so in the emitted source, the
+						// current func will come first, then newVar, then setFunc.
+						c.InsertAfter(setFunc)
+						c.InsertAfter(newVar)
+
+						// Track setFunc => newVar
+						if r.NewFunc[pkg.PkgPath] == nil {
+							r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
+						}
+						// log.Printf("Storing %s:%s", pkg.PkgPath, setFunc.Name.Name)
+						r.NewFunc[pkg.PkgPath][setFunc.Name.Name] =
+							newVar.Specs[0].(*ast.ValueSpec).Values[0].(*ast.FuncLit)
 					}
-					// log.Printf("Storing %s:%s", pkg.PkgPath, setFunc.Name.Name)
-					r.NewFunc[pkg.PkgPath][setFunc.Name.Name] =
-						newVar.Specs[0].(*ast.ValueSpec).Values[0].(*ast.FuncLit)
 				}
 			}
 			return true
@@ -284,7 +299,7 @@ func (r *Rewriter) Print(root string) error {
 			// FIXME: joining root and file this way may be wrong.  Not sure
 			// what's going to be in file at this point.  I think they're
 			// actually absolute paths, so this is definitely wrong.
-			ioutil.WriteFile(filepath.Join(root, file), buf.Bytes(), 0600)
+			os.WriteFile(filepath.Join(root, file), buf.Bytes(), 0600)
 		}
 	}
 	return nil
@@ -295,6 +310,11 @@ func (r *Rewriter) Print(root string) error {
 //
 // We're doing AST generation so things get a little Lisp-y.
 func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncDecl) {
+	// Don't rewrite generic functions, i.e., functions with type parameters
+	if node.Type.TypeParams != nil {
+		return nil, nil
+	}
+
 	newVarType := copyFuncType(node.Type)
 
 	var newArgs []ast.Expr

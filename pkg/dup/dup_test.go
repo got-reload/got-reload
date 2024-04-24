@@ -5,7 +5,6 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -16,7 +15,7 @@ import (
 var testdata embed.FS
 
 func TestCopy(t *testing.T) {
-	dir, err := ioutil.TempDir("", "")
+	dir, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +24,8 @@ func TestCopy(t *testing.T) {
 	})
 	dest := os.DirFS(dir)
 
-	err = dup.Copy(dir, dup.Target{FS: testdata, Root: "."})
+	// err = dup.Copy(dir, dup.Target{FS: testdata, Root: "."})
+	err = dup.Copy(dir, testdata)
 	if err != nil {
 		t.Fatalf("Did not expect error copying: %v", err)
 	}

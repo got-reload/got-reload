@@ -2,11 +2,9 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"flag"
 	"fmt"
 	"go/format"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -33,23 +31,6 @@ const (
 	FailedTruncate
 	FailedCleanup
 )
-
-var ToolexecUsage string = `%[1]s:
-
-%[1]s filter [flags]
-
-%[1]s [flags] %[2]s <go compiler invocation>
-
-This tool expects to be invoked by the go build toolchain. You can
-insert it like so:
-
-go build -toolexec '%[1]s %[2]s' .
-
-You *must* provide the "%[2]s" to denote the boundary between flags to
-%[1]s and the following go compiler invocation.
-
-Flags:
-`
 
 var FilterUsage string = `%[1]s filter -out <dir> package [package ...]
 
@@ -110,143 +91,13 @@ func runAsSubprocess(version string, command []string, logIt bool) error {
 }
 
 const (
-	subcommandToolexec = "toolexec"
-	subcommandRun      = "run"
-	subcommandFilter   = "filter"
+	subcommandRun    = "run"
+	subcommandFilter = "filter"
 )
 
 var subcommands = map[string]func(selfName string, args []string){
-	// subcommandToolexec: toolexec,
 	subcommandRun:    run,
 	subcommandFilter: filter,
-}
-
-func toolexec(selfName string, args []string) {
-	panic("toolexec not supported")
-	var packages string
-	var keep bool
-	set := flag.NewFlagSet(selfName, flag.ExitOnError)
-	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
-	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
-	set.BoolVar(&keep, "keep", false, "Keep all the filtered code")
-	set.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), ToolexecUsage, selfName, argListDelimiter)
-		set.PrintDefaults()
-	}
-	if err := set.Parse(args); err != nil {
-		set.Usage()
-		os.Exit(1)
-	}
-	if len(packages) < 1 {
-		log.Fatal("No packages specified")
-	}
-
-	// log.Printf("toolexec called with: %v", args)
-
-	boundary := indexOf(argListDelimiter, os.Args)
-	if boundary < 0 {
-		log.Fatalf("Must provide %s in args", argListDelimiter)
-	}
-
-	var intendedCommand []string
-	args, intendedCommand = splitAt(argListDelimiter, args)
-
-	var toDelete []string
-	finishAsNormal := func(logIt bool) {
-		// Use the list of hot packages as a version to ensure that we recompile
-		// packages each time we change the list of hot-reloadable packages.
-		if err := runAsSubprocess(packages, intendedCommand, logIt); err != nil {
-			exitError := new(exec.ExitError)
-			if errors.As(err, &exitError) {
-				os.Exit(exitError.ExitCode())
-			}
-		}
-
-		// Clean up all our generated *.go files.
-		exitCode := Success
-		if !keep {
-			for _, f := range toDelete {
-				err := os.Remove(f)
-				if err != nil {
-					exitCode = FailedCleanup
-					fmt.Fprintf(os.Stderr, "Error removing %s: %v", f, err)
-				}
-			}
-		}
-
-		os.Exit(int(exitCode))
-	}
-
-	if !strings.HasSuffix(intendedCommand[0], "compile") {
-		//log.Println("Not compiling")
-		// we are not compiling, no rewriting to do
-		finishAsNormal(false)
-	}
-
-	packageNameIndex := indexOf("-p", intendedCommand) + 1
-	if packageNameIndex < 0 {
-		// no package name in arguments, do not rewrite
-		log.Println("No package name found in compiler cmdline")
-		finishAsNormal(false)
-	}
-
-	packageName := intendedCommand[packageNameIndex]
-	if !contains(packageName, strings.Split(packages, ",")) {
-		// we are not rewriting this package
-		// log.Printf("Not target package (package=%s, targets=%v), compiling normally", packageName, packages)
-		finishAsNormal(false)
-	}
-
-	gofiles := map[string]string{}
-	for _, arg := range intendedCommand {
-		if filepath.Ext(arg) == ".go" {
-			gofiles[arg] = ""
-		}
-	}
-
-	// log.Printf("Parsing package %s", packageName)
-	r := &gotreload.Rewriter{}
-	err := r.Load(packageName)
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-	err = r.Rewrite(false)
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-
-	for file := range gofiles {
-		newName, err := rewrite(r, file)
-		if err != nil {
-			log.Fatalf("Error rewriting file %s: %v", file, err)
-		}
-		toDelete = append(toDelete, newName)
-		gofiles[file] = newName
-	}
-	registerFName, err := writeRegister(r)
-	if err != nil {
-		log.Fatalf("Error writing register files: %v", err)
-	}
-	toDelete = append(toDelete, registerFName)
-
-	// Substitute rewritten file names, and save the position of the last one.
-	var last int
-	for i, arg := range intendedCommand {
-		if filepath.Ext(arg) == ".go" {
-			intendedCommand[i] = gofiles[arg]
-			last = i
-		}
-	}
-
-	// Insert our "register" filename after the last go file.
-	intendedCommand = append(intendedCommand, "")
-	if last < len(intendedCommand)-1 {
-		copy(intendedCommand[last+2:], intendedCommand[last+1:])
-	}
-	intendedCommand[last+1] = registerFName
-
-	// log.Printf("Final cmdline: %v", intendedCommand)
-	finishAsNormal(true)
 }
 
 func run(selfName string, args []string) {
@@ -255,8 +106,8 @@ func run(selfName string, args []string) {
 	set := flag.NewFlagSet(selfName, flag.ExitOnError)
 	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
 	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
-	set.BoolVar(&verbose, "v", false, "Pass -v to \"go run\" command")
-	set.BoolVar(&keep, "keep", false, "Keep all the filtered code")
+	set.BoolVar(&verbose, "v", false, "Pass -v to \"go run\" command") // currently ignored
+	set.BoolVar(&keep, "keep", false, "Keep all the filtered code")    // currently ignored
 	set.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
 
@@ -296,10 +147,14 @@ Flags:
 	// TODO(whereswaldon):
 	// Procedure
 	// - create temporary directory
-	workDir, err := ioutil.TempDir("", "gotreload-*")
-	if err != nil {
-		log.Fatalf("Unable to create work directory: %v", err)
-	}
+
+	// workDir, err := os.MkdirTemp("", "gotreload-*")
+	// if err != nil {
+	// 	log.Fatalf("Unable to create work directory: %v", err)
+	// }
+
+	workDir := "/tmp/got-reload"
+
 	// - copy entire local module into temporary directory using dup.Copy
 	path, err := goListSingle("-m", "-f", "{{.Dir}}")
 	if err != nil {
@@ -336,6 +191,9 @@ Flags:
 	if err := runWithIOIn(workDir, "go", "get", "./..."); err != nil {
 		log.Fatalf("Failed running go get ./...: %v", err)
 	}
+	// if err := runWithIOIn(workDir, "go", "mod", "tidy"); err != nil {
+	// 	log.Fatalf("Failed running go mod tidy: %v", err)
+	// }
 	if err := runWithIOIn(workDir, "go", "run", "-v", string(mainPath)); err != nil {
 		log.Fatalf("Failed running go run: %v", err)
 	}
@@ -412,21 +270,8 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 	return writeTempFile(b.Bytes(), targetFileName)
 }
 
-// Write the grl_register.go file.
-func writeRegister(r *gotreload.Rewriter) (outputFileNames string, err error) {
-	// Since we only run toolexec on a single package, there will only be a
-	// single package to in r.Pkgs.
-	pkg := r.Pkgs[0]
-	log.Printf("register for %s: %s", pkg.Name, string(r.Info[pkg].Registrations))
-	outputFileName, err := writeTempFile(r.Info[pkg].Registrations, "grl_register.go")
-	if err != nil {
-		return "", err
-	}
-	return outputFileName, nil
-}
-
 func writeTempFile(source []byte, targetFileName string) (string, error) {
-	outputFile, err := ioutil.TempFile("", "gotreloadable-*-"+filepath.Base(targetFileName))
+	outputFile, err := os.CreateTemp("", "gotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
 		return "", fmt.Errorf("Error opening dest file: %w", err)
 	}
@@ -440,7 +285,7 @@ func writeTempFile(source []byte, targetFileName string) (string, error) {
 		}
 	}()
 
-	err = ioutil.WriteFile(outputFileName, source, 0600)
+	err = os.WriteFile(outputFileName, source, 0600)
 	if err != nil {
 		return "", err
 	}
@@ -448,6 +293,8 @@ func writeTempFile(source []byte, targetFileName string) (string, error) {
 }
 
 // Write the grl_dependencies file for each pkg.
+//
+// Not used.
 func addDependencies(packageList []string) ([]string, error) {
 	r := gotreload.Rewriter{}
 	err := r.Load(packageList...)
@@ -466,7 +313,7 @@ func addDependencies(packageList []string) ([]string, error) {
 		fileName := pkg.Fset.Position(file.Pos()).Filename
 		dir := filepath.Dir(fileName)
 		fullpath := filepath.Join(dir, "grl_dependencies.go")
-		err := ioutil.WriteFile(fullpath,
+		err := os.WriteFile(fullpath,
 			[]byte(fmt.Sprintf(`package %s
 
 import (
@@ -517,8 +364,12 @@ func filter(selfName string, args []string) {
 	}
 
 	packageList := set.Args()
+	watchedPackages := map[string]bool{}
+	for _, pkg := range packageList {
+		watchedPackages[pkg] = true
+	}
 
-	// log.Printf("Parsing package %s", packageName)
+	log.Printf("Parsing package %v", packageList)
 	r := &gotreload.Rewriter{}
 	err = r.Load(packageList...)
 	if err != nil {
@@ -554,7 +405,7 @@ func filter(selfName string, args []string) {
 				log.Fatalf("Error formatting filtered version of %s: %v", outputFileName, err)
 			}
 			outputFilePath := filepath.Join(newDir, filepath.Base(outputFileName))
-			err = ioutil.WriteFile(outputFilePath, b.Bytes(), 0644)
+			err = os.WriteFile(outputFilePath, b.Bytes(), 0644)
 			if err != nil {
 				log.Fatalf("Error writing filtered version of %s to %s: %v", outputFileName, outputFilePath, err)
 			}
@@ -562,7 +413,7 @@ func filter(selfName string, args []string) {
 		}
 
 		outputFilePath := filepath.Join(newDir, "grl_register.go")
-		err := ioutil.WriteFile(outputFilePath, r.Info[pkg].Registrations, 0644)
+		err := os.WriteFile(outputFilePath, r.Info[pkg].Registrations, 0644)
 		if err != nil {
 			log.Fatalf("Error writing %s: %v", outputFilePath, err)
 		}
@@ -581,15 +432,24 @@ func filter(selfName string, args []string) {
 		if state != 2 {
 			continue
 		}
+		// Skip packages we're watching, since we generate grl_register for
+		// them.
+		if watchedPackages[pkg.PkgPath] {
+			continue
+		}
 
-		registrationSource, err := extract.GenContent(pkg0.Name, pkg.PkgPath, true, pkg.Types, nil, nil)
+		registrationSource, err := extract.GenContent(pkg0.Name, pkg.Name, pkg.PkgPath, pkg.Types, nil, nil)
 		if err != nil {
 			log.Fatalf("Failed generating symbol registration for %s: %v", pkg.PkgPath, err)
 		}
 		fname := filepath.Join(path, "grl_"+strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(pkg.PkgPath)+".go")
+		if registrationSource == nil {
+			log.Printf("SKIPPING Registrations for %s / %s -> %s", pkg.Name, pkg.PkgPath, fname)
+			continue
+		}
 		// log.Printf("Registrations for %s / %s -> %s", pkg.Name, pkg.PkgPath, fname)
 		// log.Println(string(registrationSource))
-		ioutil.WriteFile(fname, registrationSource, 0644)
+		os.WriteFile(fname, registrationSource, 0644)
 	}
 }
 
