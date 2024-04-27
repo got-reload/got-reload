@@ -48,31 +48,56 @@ func init() {
     	"{{.ImportPath}}": {
 		{{- if .Val}}
 		// function, constant and variable definitions
-		{{range $key, $value := .Val -}}
+		{{range $key, $value := .Val}}
 			{{- if $value.Addr -}}
 				"{{$key}}": reflect.ValueOf(&{{$value.Name}}).Elem(),
 			{{else -}}
 				"{{$key}}": reflect.ValueOf({{$value.Name}}),
 			{{end -}}
 		{{end}}
-
+		{{- end -}}
+		{{- if .NeedsAccessor}}
+		// accessor functions for unexported variables
+		{{range $var, $ignored := .NeedsAccessor -}}
+			{{- /*"GRLuget_{{$var}}": reflect.ValueOf(GRLuget_{{$var}}),*/ -}}
+			{{- /*"GRLuset_{{$var}}": reflect.ValueOf(GRLuset_{{$var}}),*/ -}}
+			"GRLuaddr_{{$var}}": reflect.ValueOf(GRLuaddr_{{$var}}),
+		{{end}}
 		{{- end}}
+		{{- if .NeedsFieldAccessor}}
+		// accessor methods for unexported struct fields
+		{{range $name, $s := .NeedsFieldAccessor -}}
+		{{range $type, $thing := $s -}}
+			{{- /*"{{$thing.GetName}}": reflect.ValueOf({{$thing.GetName}}),*/ -}}
+			{{- /*"{{$thing.SetName}}": reflect.ValueOf({{$thing.SetName}}),*/ -}}
+			"{{$thing.AddrName}}": reflect.ValueOf({{$thing.AddrName}}),
+		{{end}}
+		{{- end}}
+		{{- end}}
+
 		{{- if .Typ}}
 		// type definitions
 		{{range $key, $value := .Typ -}}
 			"{{$key}}": reflect.ValueOf((*{{$value}})(nil)),
 		{{end}}
-
 		{{- end}}
+		{{if .NeedsPublicType -}}
+		// type aliases to export unexported types
+		{{range $unexportedName, $exportedName := .NeedsPublicType -}}
+		"{{$exportedName}}": reflect.ValueOf((*{{$unexportedName}})(nil)),
+		{{end}}
+		{{end}}
+
 		{{- if .Wrap}}
 		// interface wrapper definitions
 		{{range $key, $value := .Wrap -}}
 			"_{{$key}}": reflect.ValueOf((*{{$value.Name}})(nil)),
 		{{end}}
-		{{- end}}
+		{{end}}
 	},
 	})
 }
+{{- if .Wrap }}
 {{range $key, $value := .Wrap -}}
 	// {{$value.Name}} is an interface wrapper for {{$key}} type
 	type {{$value.Name}} struct {
@@ -92,20 +117,29 @@ func init() {
 		}
 	{{end}}
 {{end}}
+{{end}}
 
+{{- if .NeedsAccessor }}
 {{range $var, $type := .NeedsAccessor -}}
-func GRLuget_{{$var}}() {{$type}} { return {{$var}} }
-func GRLuset_{{$var}}(_GRLuset_var {{$type}}) { {{$var}} = _GRLuset_var }
+{{- /*func GRLuget_{{$var}}() {{$type}} { return {{$var}} }*/ -}}
+{{- /*func GRLuset_{{$var}}(_GRLuset_var {{$type}}) { {{$var}} = _GRLuset_var }*/ -}}
+func GRLuaddr_{{$var}}() *{{$type}} { return &{{$var}} }
+{{end}}
 {{end}}
 
-{{range $key, $type := .NeedsPublicType -}}
-type {{$type}} = {{$key}}
+{{- if .NeedsPublicType }}
+{{range $unexportedName, $exportedName := .NeedsPublicType -}}
+type {{$exportedName}} = {{$unexportedName}}
+{{end}}
 {{end}}
 
+{{- if .NeedsFieldAccessor }}
 {{range $name, $s := .NeedsFieldAccessor -}}
 {{range $type, $thing := $s -}}
-func (r *{{$thing.RType}}) {{$thing.GetName}}() {{$thing.FieldType}} { return r.{{$name}} }
-func (r *{{$thing.RType}}) {{$thing.SetName}}(GRL_new_val {{$thing.FieldType}}) { r.{{$name}} = GRL_new_val }
+{{- /* func (r *{{$thing.RType}}) {{$thing.GetName}}() {{$thing.FieldType}} { return r.{{$name}} } */ -}}
+{{- /* func (r *{{$thing.RType}}) {{$thing.SetName}}(GRL_new_val {{$thing.FieldType}}) { r.{{$name}} = GRL_new_val } */ -}}
+func (r *{{$thing.RType}}) {{$thing.AddrName}}() *{{$thing.FieldType}} { return &r.{{$name}} }
+{{end}}
 {{end}}
 {{end}}
 `
@@ -135,8 +169,7 @@ type Wrap struct {
 type FieldAccessor struct {
 	*types.Var
 	RType     string // receiver name
-	GetName   string // getter name
-	SetName   string // setter name
+	AddrName  string // setter name
 	FieldType string // name of type of field
 }
 

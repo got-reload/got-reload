@@ -30,8 +30,7 @@ const (
 	// Used for set functions.
 	setPrefix = "GRLfset_"
 
-	usetPrefix = "GRLuset_"
-	ugetPrefix = "GRLuget_"
+	methodUAddrPrefix = "GRLmaddr_"
 
 	utypePrefix = "GRLt_"
 )
@@ -111,6 +110,9 @@ func (r *Rewriter) Rewrite(mode RewriteMode) error {
 	return nil
 }
 
+// rewritePkg rewrites the syntax tree for all source files for a package
+// we're filtering, and also generates and writes a "registration" file for
+// said package.
 func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	if pkg.Name == "main" {
 		return fmt.Errorf("Cannot rewrite package \"main\"")
@@ -120,13 +122,26 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	}
 	// log.Printf("Pkg: %#v", pkg)
 
-	// I *think* all this is only for "rewrite" mode, not "reload" mode.
+	// I *think* all this is only for "rewrite" mode, not "reload" mode. But I
+	// might need to save the various needsFoo stuff for reload mode.
 	exported := map[types.Object]bool{}
 	definedInThisPackage := map[types.Object]bool{}
 	funcs := map[*ast.FuncDecl]string{}
-	needsAccessor := map[string]string{}                                       // var name -> its type's name
-	needsFieldAccessor := map[string]map[*types.Struct]extract.FieldAccessor{} // field name -> rtype name -> stuff
-	_ = needsFieldAccessor
+	// This tags unexported variables to generate accessor functions. We
+	// *could* just generate new variables with the address of the unexported
+	// variable, but we need to generate accessor methods for struct fields
+	// later (see needsFieldAccessor), so we might as well just keep things
+	// simple and do accessor functions here too.
+	//
+	// var name -> its type's name
+	needsAccessor := map[string]string{}
+	// This structs and their fields that need public accessor functions. The
+	// method name needs to contain the type name because we index them by name in the
+	// generated Exports map. So e.g. if struct S1 has field f1 and struct S2
+	// has field f1, we need to be able to distinguish them just by name, so
+	// e.g. GRLf_f1 would not be enough, they need to be GRLf_S1f1 and
+	// GRLf_S2f1.
+	needsFieldAccessor := map[string]map[*types.Struct]extract.FieldAccessor{} // field name -> struct type -> stuff
 	needsPublicMethodWrapper := map[string]bool{}
 	// needsPublicFuncWrapper := map[string]*types.Signature{}
 	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
@@ -207,26 +222,29 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 					// log.Printf("Found struct type with %d fields", s.NumFields())
 					for i := 0; i < s.NumFields(); i++ {
 						field := s.Field(i)
-						if !field.Exported() {
-							var fieldTypeName string
-							switch oType := field.Type().(type) {
-							case *types.Basic:
-								fieldTypeName = oType.Name()
-							case *types.Named:
-								fieldTypeName = oType.Obj().Name()
-							default:
-								panic(fmt.Sprintf("Unknown var type (%s): %#v", field.Name(), obj.Type()))
-							}
-							if needsFieldAccessor[field.Name()] == nil {
-								needsFieldAccessor[field.Name()] = map[*types.Struct]extract.FieldAccessor{}
-							}
-							needsFieldAccessor[field.Name()][s] = extract.FieldAccessor{
-								Var:       field,
-								RType:     typeName.Name(),
-								GetName:   "GRLfget_" + field.Name(),
-								SetName:   "GRLfset_" + field.Name(),
-								FieldType: fieldTypeName,
-							}
+						if field.Exported() {
+							continue
+						}
+						var fieldTypeName string
+						switch oType := field.Type().(type) {
+						case *types.Basic:
+							fieldTypeName = oType.Name()
+						case *types.Named:
+							fieldTypeName = oType.Obj().Name()
+						default:
+							panic(fmt.Sprintf("Unknown var type (%s): %#v", field.Name(), obj.Type()))
+						}
+						fieldName := field.Name()
+						methodName := methodUAddrPrefix + typeName.Name() + "_" + fieldName
+						log.Printf("Tagging struct %s.%s for an addr method: %s", typeName.Name(), fieldName, methodName)
+						if needsFieldAccessor[fieldName] == nil {
+							needsFieldAccessor[fieldName] = map[*types.Struct]extract.FieldAccessor{}
+						}
+						needsFieldAccessor[fieldName][s] = extract.FieldAccessor{
+							Var:       field,
+							RType:     typeName.Name(),
+							AddrName:  methodName,
+							FieldType: fieldTypeName,
 						}
 					}
 				}
@@ -237,19 +255,19 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	// This is for both rewrite & reload modes.
 	r.stubTopLevelFuncs(pkg, funcs)
 
-	// Find all the uses of all the stuff we exported, and export them
-	// too.  If mode == ModeReload, tag idents defined in this package for
-	// adding the package to.
-	addPackageIdent := map[*ast.Ident]bool{}
-	for ident, obj := range pkg.TypesInfo.Uses {
-		// if exported[obj] {
-		// 	ident.Name = exportPrefix + ident.Name
-		// }
-		if mode == ModeReload && definedInThisPackage[obj] {
-			// log.Printf("Add package to %s", ident.Name)
-			addPackageIdent[ident] = true
-		}
-	}
+	// // Find all the uses of all the stuff we exported, and export them
+	// // too.  If mode == ModeReload, tag idents defined in this package for
+	// // adding the package to.
+	// addPackageIdent := map[*ast.Ident]bool{}
+	// for ident, obj := range pkg.TypesInfo.Uses {
+	// 	// if exported[obj] {
+	// 	// 	ident.Name = exportPrefix + ident.Name
+	// 	// }
+	// 	if mode == ModeReload && definedInThisPackage[obj] {
+	// 		// log.Printf("Add package to %s", ident.Name)
+	// 		addPackageIdent[ident] = true
+	// 	}
+	// }
 
 	switch mode {
 	case ModeReload:
@@ -259,9 +277,9 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 			pre := func(c *astutil.Cursor) bool {
 				switch n := c.Node().(type) {
 				case *ast.Ident:
-					if !addPackageIdent[n] {
-						return true
-					}
+					// if !addPackageIdent[n] {
+					// 	return true
+					// }
 					// log.Printf("Adding package to %s", n.Name)
 					c.Replace(newSelector(pkg.Name, n.Name))
 				}
@@ -278,7 +296,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 		registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, setters, exported,
 			needsAccessor, needsPublicType, needsFieldAccessor)
 		if err != nil {
-			return fmt.Errorf("Failed generating symbol registration for %s at %s: %w", pkg.Name, pkg.PkgPath, err)
+			return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
 		}
 
 		if registrationSource != nil {
@@ -305,13 +323,13 @@ func makeExported(s string) string {
 
 // assureExported takes unexported identifiers, adds a prefix to export them,
 // and marks the associated object for later use.
-func assureExported(exported map[types.Object]bool, ident *ast.Ident, obj types.Object) {
-	if obj.Exported() {
-		return
-	}
-	ident.Name = exportPrefix + ident.Name
-	exported[obj] = true
-}
+// func assureExported(exported map[types.Object]bool, ident *ast.Ident, obj types.Object) {
+// 	if obj.Exported() {
+// 		return
+// 	}
+// 	ident.Name = exportPrefix + ident.Name
+// 	exported[obj] = true
+// }
 
 // tagForTranslation finds the function/method declaration obj is in, and tags
 // it for translation.

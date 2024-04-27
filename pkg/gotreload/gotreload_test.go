@@ -9,16 +9,19 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"reflect"
 	"regexp"
 	"testing"
 
-	. "github.com/smartystreets/goconvey/convey"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/traefik/yaegi/interp"
 )
 
 const cmdPath = "github.com/got-reload/got-reload/cmd/got-reload"
 
 var (
-	testFile1 = `
+	testFile1 = mustFormat(`
 package fake
 
 import (
@@ -138,9 +141,9 @@ func (T4) t4m3(a6 int) int {
 func F3 (a, b, c int, i ...int) int {
 	return i[0]
 }
-`
+`)
 
-	testFile2 = `
+	testFile2 = mustFormat(`
 package fake
 
 // Test a type defined in another file
@@ -148,14 +151,19 @@ var f2v1 t1
 
 type (
 	f2t1 struct {
+		f1 float32
 		f2t1f1 int
 	}
+	f2t2 struct {
+		f1 float32
+		f2t2f1 int
+	}
 )
-`
+`)
 
 	// Parse this and print it out to figure out what to generate for the
 	// rewritten functions.
-	targetFile = `
+	targetFile = mustFormat(`
 package target
 
 func target_func(arg ...int) int {
@@ -166,7 +174,7 @@ var GRLfvar_target_func = func(arg ...int) int {
 	return arg[0]
 }
 
-func GRLfvarset_target_func(f func(arg ...int) int) {
+func GRLfset_target_func(f func(arg ...int) int) {
 	GRLfvar_target_func = f
 }
 
@@ -180,12 +188,12 @@ func (r T10) unexported_method() int {
 
 type t11 struct {
 	unexported_var int
+	ExportedVar float32
 }
 
 var unexported_var int
 
-func GRLuset_unexported_var(v int) { unexported_var = v }
-func GRLuget_unexported_var() int { return unexported_var }
+func GRLuaddr_unexported_var() *int { return &unexported_var }
 
 type GRLt_t11 = t11
 
@@ -199,177 +207,267 @@ func example() {
 	}
 
 	var v T10
-	v.unexported_var = 1
-	if v.unexported_var == 0 {}
+	dummy := v.unexported_var
+	dummy2 := *v.GRLuaddr_unexported_var()
 
+	v.unexported_var = 1
 	v.GRLuset_unexported_var(1)
+	*v.GRLuaddr_unexported_var() = 1
+
+	if v.unexported_var == 0 {}
 	if v.GRLuget_unexported_var() == 0 {}
+	if *v.GRLuaddr_unexported_var() == 0 {}
+
 
 	var v GRLt_t11
+	v2 := t11{
+		unexported_var: 5,
+		ExportedVar: 6.0,
+	}
+	// The above should translate to the below (in real life, it should
+	// translate recursively). Not sure how this interacts with stuff you're
+	// not supposed to copy, like sync.Mutex. That might only be a linter
+	// error, though.
+	v3 := func() t11 {
+		tmp_unexported_var := 5
+		tmp_ExportedVar:= 6.0
+		tmp := t11{
+			ExportedVar: tmp_ExportedVar,
+		}
+		tmp.GRLmset_unexported_var(tmp_unexported_var)
+		return tmp
+	}()
 }
-`
+`)
 )
 
-func init() {
-	newFile, err := format.Source([]byte(testFile1))
+func mustFormat(src string) string {
+	res, err := format.Source([]byte(src))
 	if err != nil {
 		panic(err)
 	}
-	testFile1 = string(newFile)
+	return string(res)
+}
+
+func TestSampleFuncRewrites(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	i := interp.New(interp.Options{})
+	require.NotNil(i)
+
+	var v int = 1
+	getter := func() *int { return &v }
+	*getter() = 2
+	assert.Equal(v, 2)
+
+	// .../pkg_name/pkg_name => symbol => value
+	// type Exports map[string]map[string]reflect.Value
+	i.Use(interp.Exports{
+		"pkg/pkg": {
+			"V":      reflect.ValueOf(&v).Elem(),
+			"Getter": reflect.ValueOf(getter),
+		},
+	})
+	i.ImportUsed()
+
+	t.Run("pkg.V", func(t *testing.T) {
+		val, err := i.Eval("pkg.V")
+		require.NoError(err)
+		assert.IsType(val.Interface(), int(0))
+		assert.Equal(val.Interface().(int), v)
+	})
+	t.Run("pkg.Getter()", func(t *testing.T) {
+		val, err := i.Eval("pkg.Getter()")
+		require.NoError(err)
+		assert.IsType(val.Interface(), new(int))
+		assert.Equal(val.Interface().(*int), &v)
+	})
+	t.Run("*pkg.Getter()", func(t *testing.T) {
+		val, err := i.Eval("*pkg.Getter()")
+		require.NoError(err)
+		assert.IsType(val.Interface(), int(0))
+		assert.Equal(val.Interface().(int), v)
+	})
+	t.Run("*pkg.Getter() = 3", func(t *testing.T) {
+		_, err := i.Eval("*pkg.Getter() = 3")
+		require.NoError(err)
+		assert.Equal(v, 3)
+	})
+}
+
+var notExported int = 5
+
+func TestUnexported(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	i := interp.New(interp.Options{})
+	require.NotNil(i)
+
+	notExported = 0
+
+	i.Use(interp.Exports{
+		"pkg/pkg": {
+			"notExported": reflect.ValueOf(&notExported).Elem(),
+		},
+	})
+	i.ImportUsed()
+
+	// This is unexpected 😆
+	//
+	// I started a Q&A discussion about it in the Yaegi forum.
+	// https://github.com/traefik/yaegi/discussions/1626
+	t.Run("pkg.notExported", func(t *testing.T) {
+		val, err := i.Eval("pkg.notExported")
+		require.NoError(err)
+		assert.IsType(val.Interface(), int(0))
+		assert.Equal(val.Interface().(int), notExported)
+	})
+	t.Run("pkg.notExported = 3", func(t *testing.T) {
+		_, err := i.Eval("pkg.notExported = 3")
+		require.NoError(err)
+		assert.Equal(notExported, 3)
+	})
 }
 
 func TestCompileParse(t *testing.T) {
-	Convey("Given a testfile", t, func() {
-		cwd, err := os.Getwd()
-		So(err, ShouldBeNil)
-		// t.Logf("Getwd: %s, %v", cwd, err)
+	assert := assert.New(t)
+	require := require.New(t)
 
-		// Parse it
-		r := NewRewriter()
+	cwd, err := os.Getwd()
+	require.NoError(err)
+	// t.Logf("Getwd: %s, %v", cwd, err)
 
-		// r.Config.Logf = t.Logf
-		// // This is handy for knowing what is being parsed and by what name.
-		// r.Config.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
-		// 	t.Logf("ParseFile: %s\n", filename)
-		// 	return parser.ParseFile(fset, filename, src, 0)
-		// }
+	r := NewRewriter()
 
-		// Replace the fake t1 & t2.go with our testfile data.
-		r.Config.Overlay = map[string][]byte{
-			path.Dir(cwd) + "/fake/t1.go": []byte(testFile1),
-			path.Dir(cwd) + "/fake/t2.go": []byte(testFile2),
+	// r.Config.Logf = t.Logf
+	// // This is handy for knowing what is being parsed and by what name.
+	// r.Config.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+	// 	t.Logf("ParseFile: %s\n", filename)
+	// 	return parser.ParseFile(fset, filename, src, 0)
+	// }
+
+	// Replace the fake t1 & t2.go with our testfile data.
+	r.Config.Overlay = map[string][]byte{
+		path.Dir(cwd) + "/fake/t1.go": []byte(testFile1),
+		path.Dir(cwd) + "/fake/t2.go": []byte(testFile2),
+	}
+
+	err = r.Load("../fake")
+	require.NoError(err)
+	require.NotNil(r.Pkgs)
+
+	err = r.Rewrite(ModeRewrite)
+	require.NoError(err)
+	require.NotNil(r.Pkgs)
+	pkg := r.Pkgs[0]
+
+	// Types, variables, functions, and function bodies should translate correctly
+	file := pkg.Syntax[0]
+
+	// Do some diagnostics (maybe) even if tests fail.
+	defer func() {
+		if false {
+			// General diagnostics.
+			var buf bytes.Buffer
+
+			// Formatted output file
+			err = format.Node(&buf, pkg.Fset, file)
+			require.NoError(err)
+			t.Logf("%s", buf.String())
+			// // File AST
+			// buf = bytes.Buffer{}
+			// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
+			// Printf("%s", buf.String())
+
+			// What should the rewritten target_func() look like, ast-wise?
+			targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
+			require.NoError(err)
+			require.NotNil(targetNode)
+			buf = bytes.Buffer{}
+			ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
+			t.Logf("target: %s", buf.String())
 		}
+	}()
 
-		err = r.Load("../fake")
+	types := getTypes(file)
+	assert.Contains(types, "t1")
+	assert.Contains(types, "T2")
 
-		Convey("It should parse correctly", func() {
-			So(err, ShouldBeNil)
-			So(r.Pkgs, ShouldNotBeNil)
+	require.NotNil(r.Info[pkg])
+	require.NotNil(r.Info[pkg].Registrations)
 
-			Convey("When rewritten", func() {
-				err = r.Rewrite(ModeRewrite)
+	registrations := string(r.Info[pkg].Registrations)
+	// Change all multiple space runs with a single space
+	registrations = (regexp.MustCompile(` +`)).ReplaceAllLiteralString(registrations, " ")
 
-				Convey("It should rewrite correctly", func() {
-					So(err, ShouldBeNil)
-					So(r.Pkgs, ShouldNotBeNil)
-					pkg := r.Pkgs[0]
+	assert.Contains(registrations, "type GRLt_t1 = t1")
+	assert.NotContains(registrations, "T2 = T2")
+	assert.Contains(registrations, "type GRLt_t3 = t3")
 
-					Convey("Types, variables, functions, and function bodies should translate correctly", func() {
-						file := pkg.Syntax[0]
+	assert.Contains(registrations, "func GRLuaddr_v1() *int { return &v1 }")
 
-						// Do some diagnostics (maybe) even if tests fail.
-						defer func() {
-							if true {
-								// General diagnostics.
-								var buf bytes.Buffer
+	// So(registrations, ShouldContainSubstring, "var GRLfvar_f1 = f1")
 
-								// Formatted output file
-								err = format.Node(&buf, pkg.Fset, file)
-								So(err, ShouldBeNil)
-								Printf("%s", buf.String())
-								// // File AST
-								// buf = bytes.Buffer{}
-								// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
-								// Printf("%s", buf.String())
+	assert.Contains(registrations, "func (r *t3) GRLmaddr_t3_t3f1() *int { return &r.t3f1 }")
 
-								// What should the rewritten target_func() look like, ast-wise?
-								targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
-								So(err, ShouldBeNil)
-								So(targetNode, ShouldNotBeNil)
-								buf = bytes.Buffer{}
-								ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
-								Printf("target: %s", buf.String())
-							}
-						}()
+	// Printf("%s", string(r.Info[pkg].Registrations))
 
-						types := getTypes(file)
-						So(types, ShouldContainKey, "t1")
-						So(types, ShouldContainKey, "T2")
+	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[0].Names[0].Name,
+	// 	ShouldEqual, exportPrefix+"t3f1")
+	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[1].Names[0].Name,
+	// 	ShouldEqual, "T3f2")
+	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[2].Names[0].Name,
+	// 	ShouldEqual, "T3f3")
+	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[3].Names[0].Name,
+	// 	ShouldEqual, "T3f4")
+	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[3].Type.(*ast.Ident).Name,
+	// 	ShouldEqual, exportPrefix+"uint32")
+	// So(types, ShouldContainKey, "T4")
+	// So(types["T4"].(*ast.StructType).Fields.List[0].Names[0].Name,
+	// 	ShouldEqual, exportPrefix+"t4f1")
+	// So(types, ShouldContainKey, exportPrefix+"t5")
+	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[0].Names[0].Name,
+	// 	ShouldEqual, exportPrefix+"t5m1")
+	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[1].
+	// 	Type.(*ast.FuncType).Params.List[0].Type.(*ast.Ident).Name,
+	// 	ShouldEqual, exportPrefix+"t3")
+	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[2].
+	// 	Type.(*ast.FuncType).Params.List[0].Type.(*ast.Ident).Name,
+	// 	ShouldEqual, exportPrefix+"t3")
+	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[3].
+	// 	Type.(*ast.FuncType).Results.List[0].Type.(*ast.Ident).Name,
+	// 	ShouldEqual, exportPrefix+"t3")
+	// So(types, ShouldContainKey, "T6")
+	// So(types, ShouldContainKey, exportPrefix+"uint32")
 
-						So(r.Info[pkg], ShouldNotBeNil)
-						So(r.Info[pkg].Registrations, ShouldNotBeNil)
+	// vars := getVars(file)
+	// So(vars, ShouldContainKey, exportPrefix+"v1")
+	// So(vars, ShouldContainKey, exportPrefix+"v3")
+	// So(vars[exportPrefix+"v3"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t1")
+	// So(vars, ShouldContainKey, "V4")
+	// So(vars["V4"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t1")
+	// So(vars, ShouldContainKey, exportPrefix+"v5")
+	// So(vars[exportPrefix+"v5"].(*ast.Ident).Name, ShouldEqual, "T2")
+	// So(vars, ShouldContainKey, exportPrefix+"v6")
+	// So(vars, ShouldContainKey, exportPrefix+"v8")
+	// So(vars[exportPrefix+"v8"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t3")
+	// So(vars, ShouldContainKey, "V10")
+	// So(vars["V10"].(*ast.Ident).Name, ShouldEqual,
+	// 	exportPrefix+"uint32")
+	// So(vars, ShouldContainKey, "v11")
+	// So(vars, ShouldNotContainKey, exportPrefix+"v11")
 
-						registrations := string(r.Info[pkg].Registrations)
-						// Change all multiple space runs with a single space
-						registrations = (regexp.MustCompile(` +`)).ReplaceAllLiteralString(registrations, " ")
-
-						So(registrations, ShouldContainSubstring, "type GRLt_t1 = t1")
-						So(registrations, ShouldNotContainSubstring, "T2 = T2")
-						So(registrations, ShouldContainSubstring, "type GRLt_t3 = t3")
-
-						So(registrations, ShouldContainSubstring, "func GRLuget_v1() int { return v1 }")
-						So(registrations, ShouldContainSubstring, "func GRLuset_v1(_GRLuset_var int) { v1 = _GRLuset_var }")
-
-						// So(registrations, ShouldContainSubstring, "var GRLfvar_f1 = f1")
-
-						So(registrations, ShouldContainSubstring, "func (r *t3) GRLfget_t3f1() int { return r.t3f1 }")
-						So(registrations, ShouldContainSubstring, "func (r *t3) GRLfset_t3f1(GRL_new_val int) { r.t3f1 = GRL_new_val }")
-
-						Printf("%s", string(r.Info[pkg].Registrations))
-
-						// So(1, ShouldEqual, 0)
-
-						return
-
-						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[0].Names[0].Name,
-							ShouldEqual, exportPrefix+"t3f1")
-						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[1].Names[0].Name,
-							ShouldEqual, "T3f2")
-						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[2].Names[0].Name,
-							ShouldEqual, "T3f3")
-						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[3].Names[0].Name,
-							ShouldEqual, "T3f4")
-						So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[3].Type.(*ast.Ident).Name,
-							ShouldEqual, exportPrefix+"uint32")
-						So(types, ShouldContainKey, "T4")
-						So(types["T4"].(*ast.StructType).Fields.List[0].Names[0].Name,
-							ShouldEqual, exportPrefix+"t4f1")
-						So(types, ShouldContainKey, exportPrefix+"t5")
-						So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[0].Names[0].Name,
-							ShouldEqual, exportPrefix+"t5m1")
-						So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[1].
-							Type.(*ast.FuncType).Params.List[0].Type.(*ast.Ident).Name,
-							ShouldEqual, exportPrefix+"t3")
-						So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[2].
-							Type.(*ast.FuncType).Params.List[0].Type.(*ast.Ident).Name,
-							ShouldEqual, exportPrefix+"t3")
-						So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[3].
-							Type.(*ast.FuncType).Results.List[0].Type.(*ast.Ident).Name,
-							ShouldEqual, exportPrefix+"t3")
-						So(types, ShouldContainKey, "T6")
-						So(types, ShouldContainKey, exportPrefix+"uint32")
-
-						vars := getVars(file)
-						So(vars, ShouldContainKey, exportPrefix+"v1")
-						So(vars, ShouldContainKey, exportPrefix+"v3")
-						So(vars[exportPrefix+"v3"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t1")
-						So(vars, ShouldContainKey, "V4")
-						So(vars["V4"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t1")
-						So(vars, ShouldContainKey, exportPrefix+"v5")
-						So(vars[exportPrefix+"v5"].(*ast.Ident).Name, ShouldEqual, "T2")
-						So(vars, ShouldContainKey, exportPrefix+"v6")
-						So(vars, ShouldContainKey, exportPrefix+"v8")
-						So(vars[exportPrefix+"v8"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t3")
-						So(vars, ShouldContainKey, "V10")
-						So(vars["V10"].(*ast.Ident).Name, ShouldEqual,
-							exportPrefix+"uint32")
-						So(vars, ShouldContainKey, "v11")
-						So(vars, ShouldNotContainKey, exportPrefix+"v11")
-
-						funcs := getFuncs(file)
-						So(funcs, ShouldContainKey, exportPrefix+"f1")
-						So(funcs[exportPrefix+"f1"].Body.List[0], ShouldHaveSameTypeAs, &ast.ReturnStmt{})
-						So(funcs, ShouldContainKey, setPrefix+"f1")
-						So(funcs, ShouldContainKey, "F2")
-						So(funcs, ShouldContainKey, setPrefix+"F2")
-						So(funcs, ShouldContainKey, exportPrefix+"t3m1")
-						So(funcs, ShouldContainKey, "T4m1")
-						So(funcs, ShouldContainKey, exportPrefix+"t5m1")
-					})
-				})
-			})
-		})
-	})
+	// funcs := getFuncs(file)
+	// So(funcs, ShouldContainKey, exportPrefix+"f1")
+	// So(funcs[exportPrefix+"f1"].Body.List[0], ShouldHaveSameTypeAs, &ast.ReturnStmt{})
+	// So(funcs, ShouldContainKey, setPrefix+"f1")
+	// So(funcs, ShouldContainKey, "F2")
+	// So(funcs, ShouldContainKey, setPrefix+"F2")
+	// So(funcs, ShouldContainKey, exportPrefix+"t3m1")
+	// So(funcs, ShouldContainKey, "T4m1")
+	// So(funcs, ShouldContainKey, exportPrefix+"t5m1")
 }
 
 func _TestFirstCompile(t *testing.T) {
@@ -409,6 +507,69 @@ func _TestFirstCompile(t *testing.T) {
 		t.Fatalf("Failed to get source filter binary: %v", err)
 	}
 	// Verify the output
+}
+
+type testType struct {
+	f1 int
+	F2 int
+}
+
+func (tt *testType) m1() int {
+	return tt.f1
+}
+
+func (tt *testType) m2() int {
+	return tt.F2
+}
+
+func TestValueOfMethod(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	v := reflect.ValueOf((*testType).m1)
+	tt := testType{f1: 5}
+
+	// Does ValueOf a method do what I think it does?
+	t.Run("ValueOf", func(t *testing.T) {
+		require.NotNil(v)
+		assert.IsType((*testType).m1, v.Interface())
+		assert.IsType(func(*testType) int { return 0 }, v.Interface())
+	})
+
+	t.Run("eval ValueOf", func(t *testing.T) {
+		i := interp.New(interp.Options{})
+		i.Use(interp.Exports{
+			"pkg/pkg": {
+				"Tt":          reflect.ValueOf(&tt).Elem(),
+				"TestType":    reflect.ValueOf((*testType)(nil)),
+				"TestType_m1": reflect.ValueOf((*testType).m1),
+			},
+		})
+		i.ImportUsed()
+
+		res, err := i.Eval("pkg.TestType_m1(&pkg.Tt)")
+		require.NoError(err)
+		require.NotNil(res)
+		assert.Equal(5, res.Interface())
+	})
+
+	t.Run("create struct instance", func(t *testing.T) {
+		i := interp.New(interp.Options{})
+		i.Use(interp.Exports{
+			"pkg/pkg": {
+				"Tt":          reflect.ValueOf(&tt).Elem(),
+				"TestType":    reflect.ValueOf((*testType)(nil)),
+				"TestType_m1": reflect.ValueOf((*testType).m1),
+				"TestType_m2": reflect.ValueOf((*testType).m2),
+			},
+		})
+		i.ImportUsed()
+
+		// expected to fail: reflect: reflect.Value.Set using value obtained
+		// using unexported field
+		_, err := i.Eval("t2 := pkg.TestType{f1: 5} ; pkg.TestType_m1(&t2)")
+		require.Error(err)
+	})
 }
 
 func TestReloadParse(t *testing.T) {
