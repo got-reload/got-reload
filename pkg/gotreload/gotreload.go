@@ -48,6 +48,9 @@ type (
 
 		// Per-package supplemental information.  Used only in initial rewrite.
 		Info map[*packages.Package]*Info
+
+		needsAccessor   map[string]string
+		needsPublicType map[string]string
 	}
 
 	Info struct {
@@ -134,7 +137,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	// simple and do accessor functions here too.
 	//
 	// var name -> its type's name
-	needsAccessor := map[string]string{}
+	r.needsAccessor = map[string]string{}
 	// This structs and their fields that need public accessor functions. The
 	// method name needs to contain the type name because we index them by name in the
 	// generated Exports map. So e.g. if struct S1 has field f1 and struct S2
@@ -145,7 +148,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	needsPublicMethodWrapper := map[string]bool{}
 	// needsPublicFuncWrapper := map[string]*types.Signature{}
 	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
-	needsPublicType := map[string]string{}
+	r.needsPublicType = map[string]string{}
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
 			continue
@@ -193,14 +196,14 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
 				switch oType := obj.Type().(type) {
 				case *types.Basic:
-					needsAccessor[ident.Name] = oType.Name()
+					r.needsAccessor[ident.Name] = oType.Name()
 				case *types.Named:
-					needsAccessor[ident.Name] = oType.Obj().Name()
+					r.needsAccessor[ident.Name] = oType.Obj().Name()
 				default:
 					panic(fmt.Sprintf("Unknown var type (%s): %#v", ident.Name, obj.Type()))
 				}
 			case *types.TypeName:
-				needsPublicType[ident.Name] = utypePrefix + ident.Name
+				r.needsPublicType[ident.Name] = utypePrefix + ident.Name
 			case *types.Func:
 				// needsPublicFuncWrapper[ident.Name] = obj.Type().(*types.Signature)
 				// needsPublicFuncWrapper[ident.Name] = stubPrefix + ident.Name
@@ -294,7 +297,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 			setters = append(setters, setter)
 		}
 		registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, setters, exported,
-			needsAccessor, needsPublicType, needsFieldAccessor)
+			r.needsAccessor, r.needsPublicType, needsFieldAccessor)
 		if err != nil {
 			return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
 		}

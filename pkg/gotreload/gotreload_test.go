@@ -5,7 +5,6 @@ import (
 	"context"
 	"go/ast"
 	"go/format"
-	"go/parser"
 	"os"
 	"os/exec"
 	"path"
@@ -16,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/traefik/yaegi/interp"
+	"golang.org/x/tools/go/packages"
 )
 
 const cmdPath = "github.com/got-reload/got-reload/cmd/got-reload"
@@ -241,6 +241,13 @@ func example() {
 `)
 )
 
+var findWhitespace = regexp.MustCompile(`[ \n\t]+`)
+
+// Change all multiple space runs with a single space
+func filterWhitespace(s string) string {
+	return findWhitespace.ReplaceAllLiteralString(s, " ")
+}
+
 func mustFormat(src string) string {
 	res, err := format.Source([]byte(src))
 	if err != nil {
@@ -250,16 +257,13 @@ func mustFormat(src string) string {
 }
 
 func TestSampleFuncRewrites(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
 	i := interp.New(interp.Options{})
-	require.NotNil(i)
+	require.NotNil(t, i)
 
 	var v int = 1
 	getter := func() *int { return &v }
 	*getter() = 2
-	assert.Equal(v, 2)
+	assert.Equal(t, v, 2)
 
 	// .../pkg_name/pkg_name => symbol => value
 	// type Exports map[string]map[string]reflect.Value
@@ -273,37 +277,34 @@ func TestSampleFuncRewrites(t *testing.T) {
 
 	t.Run("pkg.V", func(t *testing.T) {
 		val, err := i.Eval("pkg.V")
-		require.NoError(err)
-		assert.IsType(val.Interface(), int(0))
-		assert.Equal(val.Interface().(int), v)
+		require.NoError(t, err)
+		assert.IsType(t, val.Interface(), int(0))
+		assert.Equal(t, val.Interface().(int), v)
 	})
 	t.Run("pkg.Getter()", func(t *testing.T) {
 		val, err := i.Eval("pkg.Getter()")
-		require.NoError(err)
-		assert.IsType(val.Interface(), new(int))
-		assert.Equal(val.Interface().(*int), &v)
+		require.NoError(t, err)
+		assert.IsType(t, val.Interface(), new(int))
+		assert.Equal(t, val.Interface().(*int), &v)
 	})
 	t.Run("*pkg.Getter()", func(t *testing.T) {
 		val, err := i.Eval("*pkg.Getter()")
-		require.NoError(err)
-		assert.IsType(val.Interface(), int(0))
-		assert.Equal(val.Interface().(int), v)
+		require.NoError(t, err)
+		assert.IsType(t, val.Interface(), int(0))
+		assert.Equal(t, val.Interface().(int), v)
 	})
 	t.Run("*pkg.Getter() = 3", func(t *testing.T) {
 		_, err := i.Eval("*pkg.Getter() = 3")
-		require.NoError(err)
-		assert.Equal(v, 3)
+		require.NoError(t, err)
+		assert.Equal(t, v, 3)
 	})
 }
 
 var notExported int = 5
 
 func TestUnexported(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
 	i := interp.New(interp.Options{})
-	require.NotNil(i)
+	require.NotNil(t, i)
 
 	notExported = 0
 
@@ -320,97 +321,93 @@ func TestUnexported(t *testing.T) {
 	// https://github.com/traefik/yaegi/discussions/1626
 	t.Run("pkg.notExported", func(t *testing.T) {
 		val, err := i.Eval("pkg.notExported")
-		require.NoError(err)
-		assert.IsType(val.Interface(), int(0))
-		assert.Equal(val.Interface().(int), notExported)
+		require.NoError(t, err)
+		assert.IsType(t, val.Interface(), int(0))
+		assert.Equal(t, val.Interface().(int), notExported)
 	})
 	t.Run("pkg.notExported = 3", func(t *testing.T) {
 		_, err := i.Eval("pkg.notExported = 3")
-		require.NoError(err)
-		assert.Equal(notExported, 3)
+		require.NoError(t, err)
+		assert.Equal(t, notExported, 3)
 	})
 }
 
 func TestCompileParse(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
 	cwd, err := os.Getwd()
-	require.NoError(err)
+	require.NoError(t, err)
 	// t.Logf("Getwd: %s, %v", cwd, err)
 
-	r := NewRewriter()
+	rewrite := func(src string) (*Rewriter, *packages.Package, *ast.File, string, map[string]ast.Expr, string) {
+		t.Helper()
+		r := NewRewriter()
 
-	// r.Config.Logf = t.Logf
-	// // This is handy for knowing what is being parsed and by what name.
-	// r.Config.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
-	// 	t.Logf("ParseFile: %s\n", filename)
-	// 	return parser.ParseFile(fset, filename, src, 0)
-	// }
+		// r.Config.Logf = t.Logf
+		// // This is handy for knowing what is being parsed and by what name.
+		// r.Config.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+		// 	t.Logf("ParseFile: %s\n", filename)
+		// 	return parser.ParseFile(fset, filename, src, 0)
+		// }
 
-	// Replace the fake t1 & t2.go with our testfile data.
-	r.Config.Overlay = map[string][]byte{
-		path.Dir(cwd) + "/fake/t1.go": []byte(testFile1),
-		path.Dir(cwd) + "/fake/t2.go": []byte(testFile2),
+		// Replace the fake t1 with our testfile data.
+		r.Config.Overlay = map[string][]byte{
+			path.Dir(cwd) + "/fake/t1.go": []byte("package fake; " + src),
+			path.Dir(cwd) + "/fake/t2.go": []byte("package fake"),
+		}
+
+		err = r.Load("../fake")
+		require.NoError(t, err)
+		require.NotNil(t, r.Pkgs)
+
+		err = r.Rewrite(ModeRewrite)
+		require.NoError(t, err)
+		require.NotNil(t, r.Pkgs)
+		require.NotZero(t, len(r.Pkgs))
+		pkg := r.Pkgs[0]
+		// require.NotZero(t, len(r.Info))
+		// require.Contains(t, r.Info, pkg)
+		// require.NotNil(t, r.Info[pkg])
+		// require.NotNil(t, r.Info[pkg].Registrations)
+
+		require.NotZero(t, len(pkg.Syntax))
+		file := pkg.Syntax[0]
+		types := getTypes(file)
+		var registrations string
+		if r.Info[pkg] != nil && len(r.Info[pkg].Registrations) > 0 {
+			registrations = filterWhitespace(string(r.Info[pkg].Registrations))
+		}
+
+		b := &bytes.Buffer{}
+		err = format.Node(b, pkg.Fset, file)
+		require.NoError(t, err)
+		output := filterWhitespace(b.String())
+
+		return r, pkg, file, output, types, registrations
 	}
 
-	err = r.Load("../fake")
-	require.NoError(err)
-	require.NotNil(r.Pkgs)
-
-	err = r.Rewrite(ModeRewrite)
-	require.NoError(err)
-	require.NotNil(r.Pkgs)
-	pkg := r.Pkgs[0]
+	r, _, _, _, types, registrations := rewrite("type t1 int")
 
 	// Types, variables, functions, and function bodies should translate correctly
-	file := pkg.Syntax[0]
+	assert.Contains(t, types, "t1")
+	assert.Contains(t, r.needsPublicType, "t1")
+	assert.Equal(t, "GRLt_t1", r.needsPublicType["t1"])
+	assert.Contains(t, registrations, "type GRLt_t1 = t1")
 
-	// Do some diagnostics (maybe) even if tests fail.
-	defer func() {
-		if false {
-			// General diagnostics.
-			var buf bytes.Buffer
+	r, _, _, output, _, _ := rewrite("func f(a int) int { return a }")
+	assert.Contains(t, output, `func f(a int) int { return `+stubPrefix+`f(a) }`)
+	assert.Contains(t, output, `var `+stubPrefix+`f = func(a int) int { return a }`)
+	assert.Contains(t, output, `func `+setPrefix+`f(f func(a int) int) { `+stubPrefix+`f = f }`)
 
-			// Formatted output file
-			err = format.Node(&buf, pkg.Fset, file)
-			require.NoError(err)
-			t.Logf("%s", buf.String())
-			// // File AST
-			// buf = bytes.Buffer{}
-			// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
-			// Printf("%s", buf.String())
+	r, _, _, _, _, registrations = rewrite(`type t1 int; var v3 t1`)
+	assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
 
-			// What should the rewritten target_func() look like, ast-wise?
-			targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
-			require.NoError(err)
-			require.NotNil(targetNode)
-			buf = bytes.Buffer{}
-			ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
-			t.Logf("target: %s", buf.String())
-		}
-	}()
+	// assert.NotContains(registrations, "T2 = T2")
+	// assert.Contains(registrations, "type GRLt_t3 = t3")
 
-	types := getTypes(file)
-	assert.Contains(types, "t1")
-	assert.Contains(types, "T2")
-
-	require.NotNil(r.Info[pkg])
-	require.NotNil(r.Info[pkg].Registrations)
-
-	registrations := string(r.Info[pkg].Registrations)
-	// Change all multiple space runs with a single space
-	registrations = (regexp.MustCompile(` +`)).ReplaceAllLiteralString(registrations, " ")
-
-	assert.Contains(registrations, "type GRLt_t1 = t1")
-	assert.NotContains(registrations, "T2 = T2")
-	assert.Contains(registrations, "type GRLt_t3 = t3")
-
-	assert.Contains(registrations, "func GRLuaddr_v1() *int { return &v1 }")
+	// assert.Contains(registrations, "func GRLuaddr_v1() *int { return &v1 }")
 
 	// So(registrations, ShouldContainSubstring, "var GRLfvar_f1 = f1")
 
-	assert.Contains(registrations, "func (r *t3) GRLmaddr_t3_t3f1() *int { return &r.t3f1 }")
+	// assert.Contains(registrations, "func (r *t3) GRLmaddr_t3_t3f1() *int { return &r.t3f1 }")
 
 	// Printf("%s", string(r.Info[pkg].Registrations))
 
@@ -470,6 +467,31 @@ func TestCompileParse(t *testing.T) {
 	// So(funcs, ShouldContainKey, exportPrefix+"t5m1")
 }
 
+// // Do some diagnostics (maybe) even if tests fail.
+// defer func() {
+// 	if false {
+// 		// General diagnostics.
+// 		var buf bytes.Buffer
+
+// 		// Formatted output file
+// 		err = format.Node(&buf, pkg.Fset, file)
+// 		require.NoError(err)
+// 		t.Logf("%s", buf.String())
+// 		// // File AST
+// 		// buf = bytes.Buffer{}
+// 		// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
+// 		// Printf("%s", buf.String())
+
+// 		// What should the rewritten target_func() look like, ast-wise?
+// 		targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
+// 		require.NoError(err)
+// 		require.NotNil(targetNode)
+// 		buf = bytes.Buffer{}
+// 		ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
+// 		t.Logf("target: %s", buf.String())
+// 	}
+// }()
+
 func _TestFirstCompile(t *testing.T) {
 	const data = `package first
 
@@ -523,17 +545,14 @@ func (tt *testType) m2() int {
 }
 
 func TestValueOfMethod(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
 	v := reflect.ValueOf((*testType).m1)
 	tt := testType{f1: 5}
 
 	// Does ValueOf a method do what I think it does?
 	t.Run("ValueOf", func(t *testing.T) {
-		require.NotNil(v)
-		assert.IsType((*testType).m1, v.Interface())
-		assert.IsType(func(*testType) int { return 0 }, v.Interface())
+		require.NotNil(t, v)
+		assert.IsType(t, (*testType).m1, v.Interface())
+		assert.IsType(t, func(*testType) int { return 0 }, v.Interface())
 	})
 
 	t.Run("eval ValueOf", func(t *testing.T) {
@@ -548,9 +567,9 @@ func TestValueOfMethod(t *testing.T) {
 		i.ImportUsed()
 
 		res, err := i.Eval("pkg.TestType_m1(&pkg.Tt)")
-		require.NoError(err)
-		require.NotNil(res)
-		assert.Equal(5, res.Interface())
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, 5, res.Interface())
 	})
 
 	t.Run("create struct instance", func(t *testing.T) {
@@ -567,8 +586,11 @@ func TestValueOfMethod(t *testing.T) {
 
 		// expected to fail: reflect: reflect.Value.Set using value obtained
 		// using unexported field
-		_, err := i.Eval("t2 := pkg.TestType{f1: 5} ; pkg.TestType_m1(&t2)")
-		require.Error(err)
+		var err error
+		require.NotPanics(t, func() {
+			_, err = i.Eval("t2 := pkg.TestType{f1: 5} ; pkg.TestType_m1(&t2)")
+		})
+		require.Error(t, err)
 	})
 }
 

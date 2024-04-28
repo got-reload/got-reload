@@ -59,8 +59,6 @@ func init() {
 		{{- if .NeedsAccessor}}
 		// accessor functions for unexported variables
 		{{range $var, $ignored := .NeedsAccessor -}}
-			{{- /*"GRLuget_{{$var}}": reflect.ValueOf(GRLuget_{{$var}}),*/ -}}
-			{{- /*"GRLuset_{{$var}}": reflect.ValueOf(GRLuset_{{$var}}),*/ -}}
 			"GRLuaddr_{{$var}}": reflect.ValueOf(GRLuaddr_{{$var}}),
 		{{end}}
 		{{- end}}
@@ -68,8 +66,6 @@ func init() {
 		// accessor methods for unexported struct fields
 		{{range $name, $s := .NeedsFieldAccessor -}}
 		{{range $type, $thing := $s -}}
-			{{- /*"{{$thing.GetName}}": reflect.ValueOf({{$thing.GetName}}),*/ -}}
-			{{- /*"{{$thing.SetName}}": reflect.ValueOf({{$thing.SetName}}),*/ -}}
 			"{{$thing.AddrName}}": reflect.ValueOf({{$thing.AddrName}}),
 		{{end}}
 		{{- end}}
@@ -121,8 +117,6 @@ func init() {
 
 {{- if .NeedsAccessor }}
 {{range $var, $type := .NeedsAccessor -}}
-{{- /*func GRLuget_{{$var}}() {{$type}} { return {{$var}} }*/ -}}
-{{- /*func GRLuset_{{$var}}(_GRLuset_var {{$type}}) { {{$var}} = _GRLuset_var }*/ -}}
 func GRLuaddr_{{$var}}() *{{$type}} { return &{{$var}} }
 {{end}}
 {{end}}
@@ -136,8 +130,6 @@ type {{$exportedName}} = {{$unexportedName}}
 {{- if .NeedsFieldAccessor }}
 {{range $name, $s := .NeedsFieldAccessor -}}
 {{range $type, $thing := $s -}}
-{{- /* func (r *{{$thing.RType}}) {{$thing.GetName}}() {{$thing.FieldType}} { return r.{{$name}} } */ -}}
-{{- /* func (r *{{$thing.RType}}) {{$thing.SetName}}(GRL_new_val {{$thing.FieldType}}) { r.{{$name}} = GRL_new_val } */ -}}
 func (r *{{$thing.RType}}) {{$thing.AddrName}}() *{{$thing.FieldType}} { return &r.{{$name}} }
 {{end}}
 {{end}}
@@ -356,8 +348,10 @@ func GenContent(
 		}
 	}
 
-	if len(val) == 0 && len(typ) == 0 {
-		log.Printf("No vals or types: %s, %s", destPkg, importPath)
+	if len(val) == 0 && len(typ) == 0 &&
+		len(needsAccessor) == 0 && len(needsPublicType) == 0 && len(needsFieldAccessor) == 0 {
+
+		log.Printf("No vals or types or public types, etc: %s, %s", destPkg, importPath)
 		return nil, nil
 	}
 
