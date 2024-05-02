@@ -256,6 +256,11 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 					if oType.Obj().Pkg().Name() == pkg.Name {
 						r.needsAccessor[ident.Name] = oType.Obj().Name()
 					} else {
+						// We need the package name of the type (for other packages,
+						// that is, packages that aren't the current package) to
+						// access unexported variables of that type, because the
+						// accessor function for this field needs to return that
+						// type.
 						r.needsAccessor[ident.Name] = fmt.Sprintf("%s.%s", oType.Obj().Pkg().Name(), oType.Obj().Name())
 						r.imports[oType.Obj().Pkg().Path()] = true
 					}
@@ -351,10 +356,6 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 			switch n := c.Node().(type) {
 			case *ast.Ident:
 				if n.IsExported() {
-					if n.Name == "ContextAlias" {
-						log.Printf("ContextAlias: %#v, parent: %#v", n, c.Parent())
-					}
-
 					// log.Printf("Exported: %s", n.Name)
 					// if _, ok := r.gotPublicType[n.Name]; ok {
 					// 	log.Printf("public type: %#v, parent: %#v",
@@ -362,18 +363,6 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 					// }
 
 					switch c.Parent().(type) {
-					// case *ast.ValueSpec:
-					// 	log.Printf("Checking %s for public type", n.Name)
-					// 	if _, ok := r.gotPublicType[n.Name]; ok {
-					// 		sel := &ast.SelectorExpr{
-					// 			X:   &ast.Ident{Name: pkg.Name},
-					// 			Sel: &ast.Ident{Name: n.Name},
-					// 		}
-					// 		log.Printf("%s: type: Replace %#v with %#v.%#v",
-					// 			pkg.Fset.Position(n.Pos()), n, sel.X, sel.Sel)
-					// 		c.Replace(sel)
-					// 	}
-
 					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.UnaryExpr:
 						sel := &ast.SelectorExpr{
 							X:   &ast.Ident{Name: pkg.Name},
@@ -400,29 +389,6 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.StarExpr:
 						// Transform <var1> into <pkg>.*funcUAddrPrefix+<var1> in
 						// assignments, expressions, and function call arguments.
-
-						// if !addPackageIdent[n] {
-						// 	return true
-						// }
-						// log.Printf("Adding package to %s", n.Name)
-						// c.Replace(newSelector(pkg.Name, n.Name))
-
-						if false {
-							path, exact := astutil.PathEnclosingInterval(file, n.Pos(), n.Pos())
-							if !exact {
-								log.Printf("Not exact: %s, %v, %v", n.Name, n.Pos(), n.End())
-							}
-							if len(path) == 1 {
-								log.Printf("path %s: only one", n.Name)
-							} else {
-								for i := range path {
-									buf := bytes.Buffer{}
-									ast.Fprint(&buf, pkg.Fset, path[i], ast.NotNilFilter)
-									log.Printf("path %s: %d:\n%s", n.Name, i, buf.String())
-								}
-							}
-						}
-
 						c.Replace(
 							&ast.StarExpr{
 								X: &ast.CallExpr{

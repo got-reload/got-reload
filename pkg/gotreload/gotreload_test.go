@@ -384,6 +384,29 @@ func TestSampleFuncRewrites(t *testing.T) {
 	})
 }
 
+func TestEvalInPackage(t *testing.T) {
+	i := interp.New(interp.Options{})
+	require.NotNil(t, i)
+
+	var v int = 8
+	i.Use(interp.Exports{
+		"pkg/pkg": {
+			"V": reflect.ValueOf(&v).Elem(),
+		},
+	})
+	i.ImportUsed()
+
+	// Can you refer to V without a package identifier?
+	_, err := i.Eval(`import . "pkg"; func init() { V = 9 }`)
+	require.NoError(t, err)
+	assert.Equal(t, 9, v)
+
+	// Can you do it again in the same interpreter?
+	_, err = i.Eval(`import . "pkg"; func init() { V = 10 }`)
+	require.NoError(t, err)
+	assert.Equal(t, 10, v)
+}
+
 var notExported int = 5
 
 func TestUnexported(t *testing.T) {

@@ -281,6 +281,13 @@ func Start() {
 						// support that. I've got a bug report in flight.
 						eFunc := fmt.Sprintf(`%s.%s(%s)`, newPkg.Name, setter, newDef)
 
+						i.Eval(fmt.Sprintf(`
+package main
+import . %q
+func main() {
+	%s
+}`, newR.Pkgs[0].PkgPath, eFunc))
+
 						// log.Printf("Eval: %s", eFunc)
 						_, err = i.Eval(eFunc)
 						if err == nil {
