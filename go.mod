@@ -8,7 +8,7 @@ replace github.com/traefik/yaegi => ../../traefik/yaegi
 require (
 	github.com/fsnotify/fsnotify v1.5.1
 	github.com/stretchr/testify v1.9.0
-	github.com/traefik/yaegi v0.16.1
+	github.com/traefik/yaegi v0.0.0-00010101000000-000000000000
 	golang.org/x/tools v0.20.0
 )
 

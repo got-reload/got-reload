@@ -42,8 +42,6 @@ var (
 	// PkgsToDirs and DirsToPkgs provide convenient lookups between local
 	// disk directories and go package names.
 	PkgsToDirs, DirsToPkgs = watchDirs()
-
-	r gotreload.Rewriter
 )
 
 var RegisteredSymbols = interp.Exports{}
@@ -107,28 +105,33 @@ func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 
 var rMux sync.Mutex
 
-func StartWatching(list []string) <-chan string {
+func StartWatching(list []string) (<-chan string, *gotreload.Rewriter) {
+	r := gotreload.NewRewriter()
 	r.Config.Dir = os.Getenv(SourceDirEnv)
 	err := r.Load(list...)
 	if err != nil {
 		log.Fatalf("Error parsing packages: %v", err)
 	}
-	err = r.Rewrite(gotreload.ModeReload)
+	err = r.Rewrite(gotreload.ModeRewrite)
 	if err != nil {
 		log.Fatalf("Error rewriting packages: %s: %v", list, err)
+	}
+	err = r.Rewrite(gotreload.ModeReload)
+	if err != nil {
+		log.Fatalf("Error reloading packages: %s: %v", list, err)
 	}
 
 	log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
 	out := make(chan string)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	for dir := range DirsToPkgs {
 		log.Printf("Watching %s", dir)
 		err := watcher.Add(dir)
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 	}
 	go func() {
@@ -146,12 +149,12 @@ func StartWatching(list []string) <-chan string {
 			}
 		}
 	}()
-	return out
+	return out, r
 }
 
 func Start() {
 	log.Println("Starting reloader")
-	changesCh := StartWatching(WatchedPkgs)
+	changesCh, r := StartWatching(WatchedPkgs)
 	const dur = 100 * time.Millisecond
 	go func() {
 		// time.Sleep(5 * time.Second) // give the other init() functions time to register all the symbols
@@ -189,9 +192,13 @@ func Start() {
 					}
 
 					// Rewrite the package in "reload" mode
-					err = newR.Rewrite(gotreload.ModeReload)
+					err = newR.Rewrite(gotreload.ModeRewrite)
 					if err != nil {
 						log.Fatalf("Error rewriting package for %s: %v", change, err)
+					}
+					err = newR.Rewrite(gotreload.ModeReload)
+					if err != nil {
+						log.Fatalf("Error reloading package for %s: %v", change, err)
 					}
 
 					// Ignore any other files from the same package that also
@@ -212,9 +219,9 @@ func Start() {
 					pkgPath := newR.Pkgs[0].PkgPath
 					pkgSetters := newR.NewFunc[newR.Pkgs[0].PkgPath]
 
-					// log.Printf("Looking for setters in %s", pkgPath)
+					log.Printf("Looking for setters in %s", pkgPath)
 					for setter := range pkgSetters {
-						// log.Printf("Looking at setter & func %s", setter)
+						log.Printf("Looking at setter & func %s", setter)
 
 						// Get a string version of the old function definition
 						origDef, err := r.FuncDef(pkgPath, setter)

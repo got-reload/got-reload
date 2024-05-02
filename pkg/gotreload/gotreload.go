@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"log"
@@ -30,6 +31,7 @@ const (
 	// Used for set functions.
 	setPrefix = "GRLfset_"
 
+	funcUAddrPrefix   = "GRLuaddr_"
 	methodUAddrPrefix = "GRLmaddr_"
 
 	utypePrefix = "GRLt_"
@@ -49,8 +51,16 @@ type (
 		// Per-package supplemental information.  Used only in initial rewrite.
 		Info map[*packages.Package]*Info
 
-		needsAccessor   map[string]string
-		needsPublicType map[string]string
+		funcs   map[*ast.FuncDecl]string
+		setters map[string]bool
+		// var name -> its type's name
+		needsAccessor            map[string]string
+		needsPublicType          map[string]string
+		gotPublicType            map[string]string
+		isPublicType             map[string]bool
+		needsFieldAccessor       map[string]map[*types.Struct]extract.FieldAccessor // field name -> struct type -> stuff
+		needsPublicMethodWrapper map[string]bool
+		imports                  map[string]bool
 	}
 
 	Info struct {
@@ -62,6 +72,7 @@ func NewRewriter() *Rewriter {
 	r := Rewriter{
 		// Make sure the mode has at least what the parser needs
 		Config: packages.Config{
+			Fset: token.NewFileSet(),
 			Mode: packages.NeedName |
 				packages.NeedFiles |
 				packages.NeedCompiledGoFiles |
@@ -70,6 +81,9 @@ func NewRewriter() *Rewriter {
 				packages.NeedTypes |
 				packages.NeedSyntax |
 				packages.NeedTypesInfo,
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
+			},
 		},
 		NewFunc: map[string]map[string]*ast.FuncLit{},
 		Info:    map[*packages.Package]*Info{},
@@ -92,7 +106,7 @@ func (r *Rewriter) Load(paths ...string) error {
 type RewriteMode int
 
 const (
-	ModeInvalid = iota
+	ModeInvalid RewriteMode = iota
 	ModeRewrite
 	ModeReload
 )
@@ -105,7 +119,13 @@ func (r *Rewriter) Rewrite(mode RewriteMode) error {
 			log.Printf("Pkg %s: No TypesInfo\n", pkg.Name)
 			continue
 		}
-		err := r.rewritePkg(pkg, mode)
+		var err error
+		switch mode {
+		case ModeRewrite:
+			err = r.rewritePkg(pkg)
+		case ModeReload:
+			err = r.reloadPkg(pkg)
+		}
 		if err != nil {
 			return err
 		}
@@ -116,7 +136,7 @@ func (r *Rewriter) Rewrite(mode RewriteMode) error {
 // rewritePkg rewrites the syntax tree for all source files for a package
 // we're filtering, and also generates and writes a "registration" file for
 // said package.
-func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
+func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 	if pkg.Name == "main" {
 		return fmt.Errorf("Cannot rewrite package \"main\"")
 	}
@@ -125,104 +145,47 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	}
 	// log.Printf("Pkg: %#v", pkg)
 
-	// I *think* all this is only for "rewrite" mode, not "reload" mode. But I
-	// might need to save the various needsFoo stuff for reload mode.
 	exported := map[types.Object]bool{}
 	definedInThisPackage := map[types.Object]bool{}
-	funcs := map[*ast.FuncDecl]string{}
+	r.funcs = map[*ast.FuncDecl]string{}
+	r.setters = map[string]bool{}
 	// This tags unexported variables to generate accessor functions. We
 	// *could* just generate new variables with the address of the unexported
 	// variable, but we need to generate accessor methods for struct fields
 	// later (see needsFieldAccessor), so we might as well just keep things
 	// simple and do accessor functions here too.
-	//
-	// var name -> its type's name
 	r.needsAccessor = map[string]string{}
-	// This structs and their fields that need public accessor functions. The
-	// method name needs to contain the type name because we index them by name in the
-	// generated Exports map. So e.g. if struct S1 has field f1 and struct S2
-	// has field f1, we need to be able to distinguish them just by name, so
-	// e.g. GRLf_f1 would not be enough, they need to be GRLf_S1f1 and
-	// GRLf_S2f1.
-	needsFieldAccessor := map[string]map[*types.Struct]extract.FieldAccessor{} // field name -> struct type -> stuff
-	needsPublicMethodWrapper := map[string]bool{}
+	// This stores structs and their fields that need public accessor
+	// functions. The method name needs to contain the type name because we
+	// index them by name in the generated Exports map. So e.g. if struct S1
+	// has field f1 and struct S2 has field f1, we need to be able to
+	// distinguish them just by name, so e.g. GRLf_f1 would not be enough, they
+	// need to be GRLf_S1f1 and GRLf_S2f1.
+	r.needsFieldAccessor = map[string]map[*types.Struct]extract.FieldAccessor{}
+	r.needsPublicMethodWrapper = map[string]bool{}
 	// needsPublicFuncWrapper := map[string]*types.Signature{}
 	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
 	r.needsPublicType = map[string]string{}
+	r.gotPublicType = map[string]string{}
+	r.isPublicType = map[string]bool{}
+	r.imports = map[string]bool{}
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
 			continue
 		}
-		// Look at struct fields and methods in interfaces.
-		if obj.Parent() == nil {
-			switch obj := obj.(type) {
-			// Struct field names
-			case *types.Var:
-			// 	if obj.IsField() {
-			// 		// assureExported(exported, ident, obj)
-			// 		if !obj.Exported() {
-			// 			needsFieldAccessor[ident.Name] = true
-			// 		}
-			// 	}
-			// Method names in interfaces.
-			case *types.Func:
-				// assureExported(exported, ident, obj)
-				if !obj.Exported() {
-					// Probably not quite right? Need the type of the struct the
-					// field is in, and the type of the field.
-					needsPublicMethodWrapper[ident.Name] = true
-				}
-				tagForTranslation(pkg, funcs, obj)
-			default:
-				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
-			}
-			continue
-		}
-		// pretty sure this is moot
-		// switch obj := obj.(type) {
-		// case *types.TypeName:
-		// 	if typ, ok := obj.Type().(*types.Struct); ok {
-		// 		log.Printf("found obj %s in %v", obj.Name(), typ)
-		// 	}
-		// }
-		if obj.Parent() != pkg.Types.Scope() {
-			// Skip any item (variable, type, etc) not at package scope.
-			continue
-		}
-		// assureExported(exported, ident, obj)
-		if !obj.Exported() {
-			switch obj := obj.(type) {
-			case *types.Var:
-				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
-				switch oType := obj.Type().(type) {
-				case *types.Basic:
-					r.needsAccessor[ident.Name] = oType.Name()
-				case *types.Named:
-					r.needsAccessor[ident.Name] = oType.Obj().Name()
-				default:
-					panic(fmt.Sprintf("Unknown var type (%s): %#v", ident.Name, obj.Type()))
-				}
-			case *types.TypeName:
-				r.needsPublicType[ident.Name] = utypePrefix + ident.Name
-			case *types.Func:
-				// needsPublicFuncWrapper[ident.Name] = obj.Type().(*types.Signature)
-				// needsPublicFuncWrapper[ident.Name] = stubPrefix + ident.Name
-			}
-		}
-		if obj, ok := obj.(*types.Func); ok {
-			tagForTranslation(pkg, funcs, obj)
-		}
-		definedInThisPackage[obj] = true
-	}
-	for _, name := range pkg.Types.Scope().Names() {
-		obj := pkg.Types.Scope().Lookup(name)
-		// log.Printf("Found obj %#v in type scope", obj)
+		// log.Printf("Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
 		if typeName, ok := obj.(*types.TypeName); ok {
-			// log.Printf("Found type name %s", typeName.Name())
+			// This doesn't work and may be wrong?
+			// if typeName.Pkg().Path() != pkg.PkgPath {
+			// 	continue
+			// }
+			// log.Printf("Def path: %s: %s", typeName.Name(), typeName.Pkg().Path())
+			if typeName.Exported() {
+				r.isPublicType[typeName.Name()] = true
+			}
+
 			if named, ok := typeName.Type().(*types.Named); ok {
-				// log.Printf("Found named type called %s, underlying %#v", typeName.Name(), named.Underlying())
 				if s, ok := named.Underlying().(*types.Struct); ok {
-					// log.Printf("Found struct type with %d fields", s.NumFields())
 					for i := 0; i < s.NumFields(); i++ {
 						field := s.Field(i)
 						if field.Exported() {
@@ -239,11 +202,11 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 						}
 						fieldName := field.Name()
 						methodName := methodUAddrPrefix + typeName.Name() + "_" + fieldName
-						log.Printf("Tagging struct %s.%s for an addr method: %s", typeName.Name(), fieldName, methodName)
-						if needsFieldAccessor[fieldName] == nil {
-							needsFieldAccessor[fieldName] = map[*types.Struct]extract.FieldAccessor{}
+						// log.Printf("Tagging struct %s.%s for an addr method: %s", typeName.Name(), fieldName, methodName)
+						if r.needsFieldAccessor[fieldName] == nil {
+							r.needsFieldAccessor[fieldName] = map[*types.Struct]extract.FieldAccessor{}
 						}
-						needsFieldAccessor[fieldName][s] = extract.FieldAccessor{
+						r.needsFieldAccessor[fieldName][s] = extract.FieldAccessor{
 							Var:       field,
 							RType:     typeName.Name(),
 							AddrName:  methodName,
@@ -253,10 +216,109 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 				}
 			}
 		}
+
+		// Look at struct fields and methods in interfaces.
+		if obj.Parent() == nil {
+			switch obj := obj.(type) {
+			// Struct field names
+			case *types.Var:
+
+			// Method names in interfaces. Might be wrong and/or simpler to do
+			// with Defs as for struct types, above.
+			case *types.Func:
+				// assureExported(exported, ident, obj)
+				if !obj.Exported() {
+					// Probably not quite right? Need the type of the struct the
+					// field is in, and the type of the field.
+					r.needsPublicMethodWrapper[ident.Name] = true
+				}
+				tagForTranslation(pkg, r.funcs, obj)
+
+			default:
+				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
+			}
+			continue
+		}
+		if obj.Parent() != pkg.Types.Scope() {
+			// Skip any item (variable, type, etc) not at package scope.
+			continue
+		}
+		// assureExported(exported, ident, obj)
+		if !obj.Exported() {
+			switch obj := obj.(type) {
+			case *types.Var:
+				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
+				switch oType := obj.Type().(type) {
+				case *types.Basic:
+					r.needsAccessor[ident.Name] = oType.Name()
+				case *types.Named:
+					// log.Printf("%s: named var type (%s): %#v, %s", pkg.Fset.Position(obj.Pos()), ident.Name, obj.Type(), oType.String())
+					if oType.Obj().Pkg().Name() == pkg.Name {
+						r.needsAccessor[ident.Name] = oType.Obj().Name()
+					} else {
+						r.needsAccessor[ident.Name] = fmt.Sprintf("%s.%s", oType.Obj().Pkg().Name(), oType.Obj().Name())
+						r.imports[oType.Obj().Pkg().Path()] = true
+					}
+				case *types.Pointer:
+					// log.Printf("%s: pointer var type (%s): %#v", pkg.Fset.Position(obj.Pos()), ident.Name, obj.Type())
+					r.needsAccessor[ident.Name] = oType.String() // might be wrong, but works in some cases
+				default:
+					panic(fmt.Sprintf("%s: Unknown var type (%s): %#v",
+						pkg.Fset.Position(obj.Pos()), ident.Name, obj.Type()))
+				}
+			case *types.TypeName:
+				public := utypePrefix + ident.Name
+				r.needsPublicType[ident.Name] = public
+				r.gotPublicType[public] = ident.Name // REMOVE
+			case *types.Func:
+				// needsPublicFuncWrapper[ident.Name] = obj.Type().(*types.Signature)
+				// needsPublicFuncWrapper[ident.Name] = stubPrefix + ident.Name
+			}
+		}
+		if obj, ok := obj.(*types.Func); ok {
+			tagForTranslation(pkg, r.funcs, obj)
+		}
+		definedInThisPackage[obj] = true
 	}
 
-	// This is for both rewrite & reload modes.
-	r.stubTopLevelFuncs(pkg, funcs)
+	r.stubTopLevelFuncs(pkg, r.funcs, ModeRewrite)
+
+	// Generate symbol registrations
+	// log.Printf("Looking for setters for pkg %s", pkg.PkgPath)
+	for setter := range r.NewFunc[pkg.PkgPath] {
+		// log.Printf("Setter: %s", setter)
+		r.setters[setter] = true
+	}
+	registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, r.setters, exported,
+		r.needsAccessor, r.needsPublicType, r.needsFieldAccessor, r.imports)
+	if err != nil {
+		return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
+	}
+
+	if registrationSource != nil {
+		// log.Printf("generated grl_register.go: %s", string(registrationSource))
+		r.Info[pkg] = &Info{Registrations: registrationSource}
+	}
+
+	// b := bytes.Buffer{}
+	// err = format.Node(&b, pkg.Fset, file)
+	// if err != nil {
+	// 	return fmt.Errorf("Error formatting updated file: %w", err)
+	// }
+	// log.Printf("Updated file: %s", b.String())
+	return nil
+}
+
+// reloadPkg rewrites the syntax tree for all source files for a package
+// we're filtering, for "reload" mode.
+func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
+	if pkg.Name == "main" {
+		return fmt.Errorf("Cannot rewrite package \"main\"")
+	}
+	if pkg.Name == "" {
+		return fmt.Errorf("Missing package name: %s %s", pkg.ID, pkg.PkgPath)
+	}
+	// log.Printf("Pkg: %#v", pkg)
 
 	// // Find all the uses of all the stuff we exported, and export them
 	// // too.  If mode == ModeReload, tag idents defined in this package for
@@ -272,43 +334,211 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	// 	}
 	// }
 
-	switch mode {
-	case ModeReload:
-		// Add a package prefix to all identifiers defined in this package
-		// (noted above), aka "reload mode".
-		for _, file := range pkg.Syntax {
-			pre := func(c *astutil.Cursor) bool {
-				switch n := c.Node().(type) {
-				case *ast.Ident:
-					// if !addPackageIdent[n] {
-					// 	return true
-					// }
-					// log.Printf("Adding package to %s", n.Name)
-					c.Replace(newSelector(pkg.Name, n.Name))
-				}
-				return true
-			}
-			file = astutil.Apply(file, pre, nil).(*ast.File)
-		}
-	case ModeRewrite:
-		// Generate symbol registrations, aka "rewrite mode".
-		var setters []string
-		for setter := range r.NewFunc[pkg.PkgPath] {
-			setters = append(setters, setter)
-		}
-		registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, setters, exported,
-			r.needsAccessor, r.needsPublicType, needsFieldAccessor)
-		if err != nil {
-			return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
-		}
+	// for ident, obj := range pkg.TypesInfo.Uses {
+	// 	log.Printf("Use: ident %#v => obj: %#v", ident, obj)
+	// }
 
-		if registrationSource != nil {
-			// log.Printf("generated grl_register.go: %s", string(registrationSource))
-			r.Info[pkg] = &Info{Registrations: registrationSource}
+	for _, file := range pkg.Syntax {
+		b := &bytes.Buffer{}
+		err := format.Node(b, pkg.Fset, file)
+		if err != nil {
+			panic(err)
 		}
-	default:
-		panic(fmt.Sprintf("Unknown mode: %d", mode))
+		log.Printf("reload: before\n%s", b.String())
+
+		replace := map[ast.Node]ast.Node{}
+		pre := func(c *astutil.Cursor) bool {
+			switch n := c.Node().(type) {
+			case *ast.Ident:
+				if n.IsExported() {
+					if n.Name == "ContextAlias" {
+						log.Printf("ContextAlias: %#v, parent: %#v", n, c.Parent())
+					}
+
+					// log.Printf("Exported: %s", n.Name)
+					// if _, ok := r.gotPublicType[n.Name]; ok {
+					// 	log.Printf("public type: %#v, parent: %#v",
+					// 		n, c.Parent())
+					// }
+
+					switch c.Parent().(type) {
+					// case *ast.ValueSpec:
+					// 	log.Printf("Checking %s for public type", n.Name)
+					// 	if _, ok := r.gotPublicType[n.Name]; ok {
+					// 		sel := &ast.SelectorExpr{
+					// 			X:   &ast.Ident{Name: pkg.Name},
+					// 			Sel: &ast.Ident{Name: n.Name},
+					// 		}
+					// 		log.Printf("%s: type: Replace %#v with %#v.%#v",
+					// 			pkg.Fset.Position(n.Pos()), n, sel.X, sel.Sel)
+					// 		c.Replace(sel)
+					// 	}
+
+					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.UnaryExpr:
+						sel := &ast.SelectorExpr{
+							X:   &ast.Ident{Name: pkg.Name},
+							Sel: &ast.Ident{Name: n.Name},
+						}
+						// log.Printf("%s: Replace %#v with %#v.%#v", pkg.Fset.Position(n.Pos()), n, sel.X, sel.Sel)
+						c.Replace(sel)
+					case *ast.Field, *ast.ValueSpec:
+						if r.isPublicType[n.Name] {
+							sel := &ast.SelectorExpr{
+								X:   &ast.Ident{Name: pkg.Name},
+								Sel: &ast.Ident{Name: n.Name},
+							}
+							// Not sure the "Position" is accurate, given the
+							// modifications I'm making to the tree
+							log.Printf("%s: Replace %#v with %#v.%#v", pkg.Fset.Position(n.Pos()), n, sel.X, sel.Sel)
+							c.Replace(sel)
+						}
+					}
+				}
+				if _, ok := r.needsAccessor[n.Name]; ok {
+					switch parent := c.Parent().(type) {
+					case *ast.ValueSpec:
+					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.StarExpr:
+						// Transform <var1> into <pkg>.*funcUAddrPrefix+<var1> in
+						// assignments, expressions, and function call arguments.
+
+						// if !addPackageIdent[n] {
+						// 	return true
+						// }
+						// log.Printf("Adding package to %s", n.Name)
+						// c.Replace(newSelector(pkg.Name, n.Name))
+
+						if false {
+							path, exact := astutil.PathEnclosingInterval(file, n.Pos(), n.Pos())
+							if !exact {
+								log.Printf("Not exact: %s, %v, %v", n.Name, n.Pos(), n.End())
+							}
+							if len(path) == 1 {
+								log.Printf("path %s: only one", n.Name)
+							} else {
+								for i := range path {
+									buf := bytes.Buffer{}
+									ast.Fprint(&buf, pkg.Fset, path[i], ast.NotNilFilter)
+									log.Printf("path %s: %d:\n%s", n.Name, i, buf.String())
+								}
+							}
+						}
+
+						c.Replace(
+							&ast.StarExpr{
+								X: &ast.CallExpr{
+									Fun: &ast.SelectorExpr{
+										X: &ast.Ident{
+											Name: pkg.Name,
+										},
+										Sel: &ast.Ident{
+											Name: funcUAddrPrefix + n.Name,
+										},
+									},
+								},
+							})
+
+					case *ast.UnaryExpr:
+						// Similar to the above, except without the StarExpr to
+						// deref the pointer returned by the function.
+						replace[parent] =
+							&ast.CallExpr{
+								Fun: &ast.SelectorExpr{
+									X: &ast.Ident{
+										Name: pkg.Name,
+									},
+									Sel: &ast.Ident{
+										Name: funcUAddrPrefix + n.Name,
+									},
+								},
+							}
+
+					case *ast.SelectorExpr:
+						replace[parent] =
+							&ast.SelectorExpr{
+								X: &ast.CallExpr{
+									Fun: &ast.SelectorExpr{
+										X: &ast.Ident{
+											Name: pkg.Name,
+										},
+										Sel: &ast.Ident{
+											Name: funcUAddrPrefix + n.Name,
+										},
+									},
+								},
+								Sel: &ast.Ident{
+									Name: parent.Sel.Name,
+								},
+							}
+
+					default:
+						buf := bytes.Buffer{}
+						ast.Fprint(&buf, pkg.Fset, parent, ast.NotNilFilter)
+						log.Printf("path %s:\n%s", n.Name, buf.String())
+						panic(fmt.Sprintf("Unknown node type in expression involving %s", n.Name))
+					}
+				}
+				if _, ok := r.needsFieldAccessor[n.Name]; ok {
+					pos := pkg.Fset.Position(n.Pos())
+					// log.Printf("%s: needsFieldAccessor? %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, par, pkg.TypesInfo.Uses[n])
+					if se, ok := c.Parent().(*ast.SelectorExpr); ok {
+						if selIdent, ok := se.X.(*ast.Ident); ok {
+							if named, ok := pkg.TypesInfo.Uses[selIdent].Type().(*types.Named); ok {
+								if s, ok := named.Underlying().(*types.Struct); ok {
+									// log.Printf("%s: setting replacement: %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, c.Parent(), pkg.TypesInfo.Uses[n])
+									replace[c.Parent()] =
+										&ast.StarExpr{
+											X: &ast.CallExpr{
+												Fun: &ast.SelectorExpr{
+													X: &ast.Ident{
+														Name: selIdent.Name,
+													},
+													Sel: &ast.Ident{
+														Name: r.needsFieldAccessor[n.Name][s].AddrName,
+													},
+												}}}
+								} else {
+									log.Printf("%s: s not found for %s; underlying: %#v", pos, n.Name, named.Underlying())
+								}
+							} else {
+								log.Printf("%s: types.Named not found for %s", pos, n.Name)
+							}
+						} else {
+							log.Printf("%s: SelectorExpr not found for %s", pos, n.Name)
+						}
+					}
+				}
+				if publicType, ok := r.needsPublicType[n.Name]; ok {
+					switch c.Parent().(type) {
+					case *ast.ValueSpec:
+						// log.Printf("Setting public type: %s to %s.%s", n.Name, pkg.Name, publicType)
+						c.Replace(
+							&ast.SelectorExpr{
+								X:   &ast.Ident{Name: pkg.Name},
+								Sel: &ast.Ident{Name: publicType},
+							})
+					}
+				}
+			}
+			return true
+		}
+		post := func(c *astutil.Cursor) bool {
+			if r, ok := replace[c.Node()]; ok {
+				c.Replace(r)
+			}
+			return true
+		}
+		file = astutil.Apply(file, pre, post).(*ast.File)
+
+		b = &bytes.Buffer{}
+		err = format.Node(b, pkg.Fset, file)
+		if err != nil {
+			panic(err)
+		}
+		log.Printf("reload: after\n%s", b.String())
 	}
+
+	// This is for both rewrite & reload modes. (... Is it, though???)
+	r.stubTopLevelFuncs(pkg, r.funcs, ModeReload)
 
 	// b := bytes.Buffer{}
 	// err = format.Node(&b, pkg.Fset, file)
@@ -319,6 +549,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, mode RewriteMode) error {
 	return nil
 }
 
+// not used
 func makeExported(s string) string {
 	r, sz := utf8.DecodeRuneInString(s)
 	return string(unicode.ToUpper(r)) + s[sz:]
@@ -338,7 +569,7 @@ func makeExported(s string) string {
 // it for translation.
 func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, obj *types.Func) {
 	// log.Printf("Func: %#v\n", obj)
-	file := findFile(pkg, obj)
+	file := findFile(pkg, obj.Pos())
 	if file == nil {
 		log.Printf("Warning: Cannot find file for %s\n", obj.Name())
 		return
@@ -372,8 +603,8 @@ func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, ob
 	log.Printf("Warning: Cannot find FuncDecl for %s\n", obj.FullName())
 }
 
-func findFile(pkg *packages.Package, obj *types.Func) *ast.File {
-	objFileName := pkg.Fset.Position(obj.Pos()).Filename
+func findFile(pkg *packages.Package, pos token.Pos) *ast.File {
+	objFileName := pkg.Fset.Position(pos).Filename
 	for _, file := range pkg.Syntax {
 		if objFileName == pkg.Fset.Position(file.Pos()).Filename {
 			return file
@@ -385,7 +616,7 @@ func findFile(pkg *packages.Package, obj *types.Func) *ast.File {
 // stubTopLevelFuncs finds all the top-level functions and methods and stubs
 // them out. It also saves a pointer to the syntax tree of the function
 // literal, for later use.
-func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncDecl]string) {
+func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncDecl]string, mode RewriteMode) {
 	for _, file := range pkg.Syntax {
 		pre := func(c *astutil.Cursor) bool {
 			switch n := c.Node().(type) {
@@ -399,20 +630,26 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 
 					// log.Printf("Translating %s\n", name)
 
-					newVar, setFunc := rewriteFunc(pkg.PkgPath, name, n)
+					newVar, funcLit, setFunc := rewriteFunc(pkg.PkgPath, name, n)
 					if newVar != nil && setFunc != nil {
-						// These are like a stack, so in the emitted source, the
-						// current func will come first, then newVar, then setFunc.
-						c.InsertAfter(setFunc)
-						c.InsertAfter(newVar)
+						// If this is correct, then I shouldn't even call this
+						// function in ModeReload
+						if mode == ModeRewrite {
+							// These are like a stack, so in the emitted source, the
+							// current func will come first, then newVar, then setFunc.
+							c.InsertAfter(setFunc)
+							c.InsertAfter(newVar)
 
-						// Track setFunc => newVar
-						if r.NewFunc[pkg.PkgPath] == nil {
-							r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
+							// FIXME: Not sure this bit belongs only in Rewrite mode,
+							// or maybe not exactly this way
+
+							// Track setFunc => newVar
+							if r.NewFunc[pkg.PkgPath] == nil {
+								r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
+							}
+							// log.Printf("Storing %s: %s", pkg.PkgPath, setFunc.Name.Name)
+							r.NewFunc[pkg.PkgPath][setFunc.Name.Name] = funcLit
 						}
-						// log.Printf("Storing %s:%s", pkg.PkgPath, setFunc.Name.Name)
-						r.NewFunc[pkg.PkgPath][setFunc.Name.Name] =
-							newVar.Specs[0].(*ast.ValueSpec).Values[0].(*ast.FuncLit)
 					}
 				}
 			}
@@ -425,6 +662,8 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 }
 
 // Print prints the rewritten files to a tree rooted in the given path.
+//
+// Not currently used ... but does look handy?
 func (r *Rewriter) Print(root string) error {
 	for _, pkg := range r.Pkgs {
 		for i, file := range pkg.CompiledGoFiles {
@@ -449,10 +688,10 @@ func (r *Rewriter) Print(root string) error {
 // AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
-func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncDecl) {
+func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncLit, *ast.FuncDecl) {
 	// Don't rewrite generic functions, i.e., functions with type parameters
 	if node.Type.TypeParams != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	newVarType := copyFuncType(node.Type)
@@ -524,6 +763,7 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 			}
 		}
 	}
+	// log.Printf("rewriteFunc: %s: newArgs: %d, %v", name, len(newArgs), newArgs)
 
 	// Define the new body of the function/method to just call the stub.
 	stubCall := &ast.CallExpr{
@@ -549,18 +789,19 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 					}}}}
 	}
 
+	funcLit := &ast.FuncLit{
+		Type: newVarType,
+		Body: node.Body,
+	}
+
 	// Define the stub with the new arglist, and old body from the
 	// function/method.
 	newVar := &ast.GenDecl{
 		Tok: token.VAR,
 		Specs: []ast.Spec{
 			&ast.ValueSpec{
-				Names: []*ast.Ident{{Name: stubPrefix + name}},
-				Values: []ast.Expr{
-					&ast.FuncLit{
-						Type: newVarType,
-						Body: node.Body,
-					}}}}}
+				Names:  []*ast.Ident{{Name: stubPrefix + name}},
+				Values: []ast.Expr{funcLit}}}}
 
 	// Define the Set function
 	setFunc := &ast.FuncDecl{
@@ -581,7 +822,7 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 
 	// Replace the node's body with the new body in-place.
 	node.Body = body
-	return newVar, setFunc
+	return newVar, funcLit, setFunc
 }
 
 func newSelector(x, sel string) *ast.SelectorExpr {
@@ -634,6 +875,7 @@ func (r *Rewriter) FuncDef(pkgPath, setter string) (string, error) {
 			continue
 		}
 		b := &bytes.Buffer{}
+		log.Printf("NewFunc[%s][%s]: %#v", pkgPath, setter, r.NewFunc[pkgPath][setter])
 		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][setter])
 		return b.String(), nil
 	}

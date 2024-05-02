@@ -77,19 +77,20 @@ func init() {
 			"{{$key}}": reflect.ValueOf((*{{$value}})(nil)),
 		{{end}}
 		{{- end}}
+
 		{{if .NeedsPublicType -}}
 		// type aliases to export unexported types
 		{{range $unexportedName, $exportedName := .NeedsPublicType -}}
 		"{{$exportedName}}": reflect.ValueOf((*{{$unexportedName}})(nil)),
 		{{end}}
-		{{end}}
+		{{- end}}
 
 		{{- if .Wrap}}
 		// interface wrapper definitions
 		{{range $key, $value := .Wrap -}}
 			"_{{$key}}": reflect.ValueOf((*{{$value.Name}})(nil)),
 		{{end}}
-		{{end}}
+		{{- end -}}
 	},
 	})
 }
@@ -116,18 +117,21 @@ func init() {
 {{end}}
 
 {{- if .NeedsAccessor }}
+// Accessor functions for unexported variables
 {{range $var, $type := .NeedsAccessor -}}
 func GRLuaddr_{{$var}}() *{{$type}} { return &{{$var}} }
 {{end}}
 {{end}}
 
 {{- if .NeedsPublicType }}
+// Type aliases
 {{range $unexportedName, $exportedName := .NeedsPublicType -}}
 type {{$exportedName}} = {{$unexportedName}}
 {{end}}
 {{end}}
 
 {{- if .NeedsFieldAccessor }}
+// Field accessors
 {{range $name, $s := .NeedsFieldAccessor -}}
 {{range $type, $thing := $s -}}
 func (r *{{$thing.RType}}) {{$thing.AddrName}}() *{{$thing.FieldType}} { return &r.{{$name}} }
@@ -189,12 +193,13 @@ func matchList(name string, list []string) (match bool, err error) {
 func GenContent(
 	destPkg, basePkgName, importPath string,
 	p *types.Package,
-	setFuncs []string,
+	setFuncs map[string]bool,
 	exported map[types.Object]bool,
 	needsAccessor map[string]string,
 	needsPublicType map[string]string,
 	// needsPublicFuncWrapper map[string]string,
 	needsFieldAccessor map[string]map[*types.Struct]FieldAccessor, // field name -> rtype name -> stuff
+	imports map[string]bool,
 ) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
@@ -202,8 +207,10 @@ func GenContent(
 	typ := map[string]string{}
 	val := map[string]Val{}
 	wrap := map[string]Wrap{}
-	imports := map[string]bool{}
 	sc := p.Scope()
+	if imports == nil {
+		imports = map[string]bool{}
+	}
 
 	// pkgSeen := map[string]string{}
 	// pkgSeen[basePkgName] = importPath
@@ -221,10 +228,14 @@ func GenContent(
 		// 	// return nil, nil
 		// }
 		// pkgSeen[pkg.Name()] = pkg.Path()
-		imports[pkg.Path()] = false
+		if !imports[pkg.Path()] {
+			// log.Printf("Setting pkg %s to not imported (1)", pkg.Path())
+			imports[pkg.Path()] = false
+		}
 	}
 	qualify := func(pkg *types.Package) string {
 		if pkg.Path() != importPath {
+			// log.Printf("Setting pkg %s to imported (2)", pkg.Path())
 			imports[pkg.Path()] = true
 		}
 		return pkg.Name()
@@ -241,6 +252,7 @@ func GenContent(
 
 		pkgPrefix := ""
 		if pkgName := o.Pkg().Name(); destPkg != pkgName {
+			// log.Printf("Setting pkg %s to imported (3)", importPath)
 			imports[importPath] = true
 			pkgPrefix = pkgName + "."
 		}
@@ -348,17 +360,17 @@ func GenContent(
 		}
 	}
 
+	// Create a val slot for all the generated setter functions (GRLset_XXX),
+	// just like *types.Func above.
+	for name := range setFuncs {
+		val[name] = Val{name, false}
+	}
+
 	if len(val) == 0 && len(typ) == 0 &&
 		len(needsAccessor) == 0 && len(needsPublicType) == 0 && len(needsFieldAccessor) == 0 {
 
 		log.Printf("No vals or types or public types, etc: %s, %s", destPkg, importPath)
 		return nil, nil
-	}
-
-	// Create a val slot for all the generated setter functions (GRLset_XXX),
-	// just like *types.Func above.
-	for _, name := range setFuncs {
-		val[name] = Val{name, false}
 	}
 
 	// Generate buildTags with Go version only for stdlib packages.

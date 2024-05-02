@@ -5,6 +5,8 @@ import (
 	"context"
 	"go/ast"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path"
@@ -166,6 +168,9 @@ type (
 	targetFile = mustFormat(`
 package target
 
+import "sync"
+import "context"
+
 func target_func(arg ...int) int {
 	return GRLfvar_target_func(arg...)
 }
@@ -197,6 +202,69 @@ func GRLuaddr_unexported_var() *int { return &unexported_var }
 
 type GRLt_t11 = t11
 
+type t1 struct {
+	f1 int
+}
+
+var v3, V4 int
+
+var v5 sync.Mutex
+
+var v7 = new(float32)
+
+func F() { 
+	v3 = V4
+	*fake.GRLuaddr_v3() = fake.V4
+	V4 = v3
+	fake.V4 = *fake.GRLuaddr_v3()
+	V4 = v3 + 5
+	fake.V4 = *fake.GRLuaddr_v3() + 5
+
+	var v_t1 t1
+
+	v_t1.f1 = 5
+	*v_t1.GRLmaddr_t1_f1() = 5
+	fake.V4 = v_t1.f1
+	fake.V4 = *v_t1.GRLmaddr_t1_f1()
+
+	fmt.Printf("%v, %p, %v, %p", v3, &v3, V4, &V4)
+	fmt.Printf("%v, %p, %v, %p", *fake.GRLuaddr_v3(), fake.GRLuaddr_v3(), fake.V4, &fake.V4)
+
+	v5.Lock()
+	fake.GRLuaddr_v5().Lock()
+
+	*v7 += 0.1
+	**fake.GRLuaddr_v7() += 0.1
+
+}
+
+type ContextAlias = context.Context
+
+func F7(ctx ContextAlias) {
+	var ctx2 ContextAlias
+	_ = ctx2
+	<-ctx.Done()
+}
+
+func F7_rewrite(ctx fake.ContextAlias) {
+	var ctx2 fake.ContextAlias
+	_ = ctx2
+	<-ctx.Done()
+}
+
+// Type name needs work; this type and the next method need to be in the
+// grl_registrations.go file.
+type GRLt_xlat_t11 struct {
+	GRL_field_unexported_var int
+	ExportedVar float32
+}
+func (r *GRLt_xlat_t11) GRL_Xlat() *t11 {
+	return &t11{
+		unexported_var: r.GRL_field_unexported_var,
+		ExportedVar: r.ExportedVar,
+	}
+}
+
 func example() {
 	unexported_var = 1 // test set
 	if unexported_var == 0 { // test get
@@ -220,6 +288,7 @@ func example() {
 
 
 	var v GRLt_t11
+	var vE fake.GRLt_t11
 	v2 := t11{
 		unexported_var: 5,
 		ExportedVar: 6.0,
@@ -228,16 +297,12 @@ func example() {
 	// translate recursively). Not sure how this interacts with stuff you're
 	// not supposed to copy, like sync.Mutex. That might only be a linter
 	// error, though.
-	v3 := func() t11 {
-		tmp_unexported_var := 5
-		tmp_ExportedVar:= 6.0
-		tmp := t11{
-			ExportedVar: tmp_ExportedVar,
-		}
-		tmp.GRLmset_unexported_var(tmp_unexported_var)
-		return tmp
-	}()
+	v3 := *(GRLt_xlat_t11{
+		GRL_field_unexported_var: 5,
+		ExportedVar: 6.0,
+	}.Xlat())
 }
+
 `)
 )
 
@@ -260,17 +325,31 @@ func TestSampleFuncRewrites(t *testing.T) {
 	i := interp.New(interp.Options{})
 	require.NotNil(t, i)
 
+	// Verify basic Go syntax, haha
 	var v int = 1
-	getter := func() *int { return &v }
-	*getter() = 2
-	assert.Equal(t, v, 2)
+	GRLuaddr_v := func() *int { return &v }
+	*GRLuaddr_v() = 2
+	assert.Equal(t, 2, v)
+	*GRLuaddr_v() += 2
+	assert.Equal(t, 4, v)
+
+	var f = new(float64)
+	var f2 float64
+	GRLuaddr_f := func() **float64 { return &f }
+	**GRLuaddr_f() = 2.0
+	assert.Equal(t, 2.0, *f)
+	**GRLuaddr_f() += 2.0
+	assert.Equal(t, 4.0, *f)
+	*GRLuaddr_f() = &f2
+	f2 = 5
+	assert.Equal(t, 5.0, **GRLuaddr_f())
 
 	// .../pkg_name/pkg_name => symbol => value
 	// type Exports map[string]map[string]reflect.Value
 	i.Use(interp.Exports{
 		"pkg/pkg": {
-			"V":      reflect.ValueOf(&v).Elem(),
-			"Getter": reflect.ValueOf(getter),
+			"V":          reflect.ValueOf(&v).Elem(),
+			"GRLuaddr_v": reflect.ValueOf(GRLuaddr_v),
 		},
 	})
 	i.ImportUsed()
@@ -278,25 +357,30 @@ func TestSampleFuncRewrites(t *testing.T) {
 	t.Run("pkg.V", func(t *testing.T) {
 		val, err := i.Eval("pkg.V")
 		require.NoError(t, err)
-		assert.IsType(t, val.Interface(), int(0))
-		assert.Equal(t, val.Interface().(int), v)
+		assert.IsType(t, int(0), val.Interface())
+		assert.Equal(t, v, val.Interface().(int))
 	})
-	t.Run("pkg.Getter()", func(t *testing.T) {
-		val, err := i.Eval("pkg.Getter()")
+	t.Run("pkg.GRLuaddr_v()", func(t *testing.T) {
+		val, err := i.Eval("pkg.GRLuaddr_v()")
 		require.NoError(t, err)
-		assert.IsType(t, val.Interface(), new(int))
-		assert.Equal(t, val.Interface().(*int), &v)
+		assert.IsType(t, new(int), val.Interface())
+		assert.Equal(t, &v, val.Interface().(*int))
 	})
-	t.Run("*pkg.Getter()", func(t *testing.T) {
-		val, err := i.Eval("*pkg.Getter()")
+	t.Run("*pkg.GRLuaddr_v()", func(t *testing.T) {
+		val, err := i.Eval("*pkg.GRLuaddr_v()")
 		require.NoError(t, err)
-		assert.IsType(t, val.Interface(), int(0))
-		assert.Equal(t, val.Interface().(int), v)
+		assert.IsType(t, int(0), val.Interface())
+		assert.Equal(t, v, val.Interface().(int))
 	})
-	t.Run("*pkg.Getter() = 3", func(t *testing.T) {
-		_, err := i.Eval("*pkg.Getter() = 3")
+	t.Run("*pkg.GRLuaddr_v() = 3", func(t *testing.T) {
+		_, err := i.Eval("*pkg.GRLuaddr_v() = 3")
 		require.NoError(t, err)
 		assert.Equal(t, v, 3)
+	})
+	t.Run("*pkg.GRLuaddr_v() += 2", func(t *testing.T) {
+		_, err := i.Eval("*pkg.GRLuaddr_v() += 2")
+		require.NoError(t, err)
+		assert.Equal(t, v, 5)
 	})
 }
 
@@ -322,8 +406,8 @@ func TestUnexported(t *testing.T) {
 	t.Run("pkg.notExported", func(t *testing.T) {
 		val, err := i.Eval("pkg.notExported")
 		require.NoError(t, err)
-		assert.IsType(t, val.Interface(), int(0))
-		assert.Equal(t, val.Interface().(int), notExported)
+		assert.IsType(t, int(0), val.Interface())
+		assert.Equal(t, notExported, val.Interface().(int))
 	})
 	t.Run("pkg.notExported = 3", func(t *testing.T) {
 		_, err := i.Eval("pkg.notExported = 3")
@@ -339,6 +423,7 @@ func TestCompileParse(t *testing.T) {
 
 	rewrite := func(src string) (*Rewriter, *packages.Package, *ast.File, string, map[string]ast.Expr, string) {
 		t.Helper()
+		// log.Printf("rewrite: package fake; %s", src)
 		r := NewRewriter()
 
 		// r.Config.Logf = t.Logf
@@ -349,9 +434,10 @@ func TestCompileParse(t *testing.T) {
 		// }
 
 		// Replace the fake t1 with our testfile data.
+		path := path.Dir(cwd) + "/fake"
 		r.Config.Overlay = map[string][]byte{
-			path.Dir(cwd) + "/fake/t1.go": []byte("package fake; " + src),
-			path.Dir(cwd) + "/fake/t2.go": []byte("package fake"),
+			path + "/t1.go": []byte("package fake; " + src),
+			path + "/t2.go": []byte("package fake"),
 		}
 
 		err = r.Load("../fake")
@@ -392,13 +478,102 @@ func TestCompileParse(t *testing.T) {
 	assert.Equal(t, "GRLt_t1", r.needsPublicType["t1"])
 	assert.Contains(t, registrations, "type GRLt_t1 = t1")
 
-	r, _, _, output, _, _ := rewrite("func f(a int) int { return a }")
-	assert.Contains(t, output, `func f(a int) int { return `+stubPrefix+`f(a) }`)
-	assert.Contains(t, output, `var `+stubPrefix+`f = func(a int) int { return a }`)
-	assert.Contains(t, output, `func `+setPrefix+`f(f func(a int) int) { `+stubPrefix+`f = f }`)
+	r, _, _, output, _, registrations := rewrite("func f(a int) int { return a }")
+	assert.Contains(t, output, `func f(a int) int { return GRLfvar_f(a) }`)
+	assert.Contains(t, output, `var GRLfvar_f = func(a int) int { return a }`)
+	assert.Contains(t, output, `func GRLfset_f(f func(a int) int) { GRLfvar_f = f }`)
+	assert.Contains(t, r.setters, "GRLfset_f")
+	assert.Contains(t, registrations, `reflect.ValueOf(GRLfset_f)`) // incomplete check
+	// log.Printf("registrations:\n%s", registrations)
 
 	r, _, _, _, _, registrations = rewrite(`type t1 int; var v3 t1`)
 	assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
+
+	r, pkg, _, output, _, registrations := rewrite(`
+import "fmt"
+import "sync"
+
+type t1 int
+type t2 struct {
+	f1 t1
+	F2 int
+}
+var v3 t1
+var V4 t1
+
+var v5 = new(float32)
+
+var v6 sync.Mutex
+
+var v7 = new(float32)
+
+type M sync.Mutex
+
+type ContextAlias = context.Context
+
+func F() { v3 = V4 }
+func F2() { 
+	V4 = v3 
+	V4 = v3 + 5
+	V4 = 6 + v3
+}
+func F3() {
+	var v_t2 t2
+	V4 = v_t2.f1
+}
+func F4() {
+	fmt.Printf("%v %p %v %p", v3, &v3, V4, &V4)
+}
+func F5() {
+	v6.Lock()
+}
+func F6() {
+	*v7 += 0.1
+}
+func F7(ctx ContextAlias) {
+	<-ctx.Done()
+
+	var ctx2 ContextAlias
+	_ = ctx2
+}
+func F8(a int, b float32) (int, float32) {
+	return a, b
+}
+`)
+	assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
+	assert.Contains(t, registrations, `func GRLuaddr_v5() **float32 { return &v5 }`)
+	assert.Contains(t, registrations, `func GRLuaddr_v6() *sync.Mutex { return &v6 }`)
+	assert.Contains(t, registrations, `"sync"`)
+	assert.Contains(t, registrations, `"M": reflect.ValueOf((*M)(nil))`)
+	assert.Contains(t, registrations, `"ContextAlias": reflect.ValueOf((*ContextAlias)(nil))`)
+	// log.Printf("registrations: %s", registrations)
+
+	r.Rewrite(ModeReload)
+
+	funcEquals := func(funcKey, funcValue string) {
+		t.Helper()
+		output := formatNode(t, pkg.Fset, r.NewFunc[r.Pkgs[0].PkgPath][funcKey])
+		assert.Equal(t, funcValue, output)
+	}
+
+	funcEquals("GRLfset_F", "func() { *fake.GRLuaddr_v3() = fake.V4 }")
+	funcEquals("GRLfset_F2", "func() { fake.V4 = *fake.GRLuaddr_v3() fake.V4 = *fake.GRLuaddr_v3() + 5 fake.V4 = 6 + *fake.GRLuaddr_v3() }")
+	funcEquals("GRLfset_F3", "func() { var v_t2 fake.GRLt_t2 fake.V4 = *v_t2.GRLmaddr_t2_f1() }")
+	funcEquals("GRLfset_F4", `func() { fmt.Printf("%v %p %v %p", *fake.GRLuaddr_v3(), fake.GRLuaddr_v3(), fake.V4, &fake.V4) }`)
+	funcEquals("GRLfset_F5", "func() { fake.GRLuaddr_v6().Lock() }")
+	funcEquals("GRLfset_F6", "func() { **fake.GRLuaddr_v7() += 0.1 }")
+	// I dunno what's up with that trailing comma ...
+	funcEquals("GRLfset_F7", "func(ctx fake.ContextAlias,) { <-ctx.Done() var ctx2 fake.ContextAlias _ = ctx2 }")
+	funcEquals("GRLfset_F8", "func(a int, b float32) (int, float32) { return a, b }")
+
+	// What should the rewritten target_func() look like, ast-wise?
+	fs := token.NewFileSet()
+	targetNode, err := parser.ParseFile(fs, "target", targetFile, parser.SkipObjectResolution)
+	require.NoError(t, err)
+	require.NotNil(t, targetNode)
+	buf := bytes.Buffer{}
+	ast.Fprint(&buf, fs, targetNode, ast.NotNilFilter)
+	t.Logf("target:\n%s", buf.String())
 
 	// assert.NotContains(registrations, "T2 = T2")
 	// assert.Contains(registrations, "type GRLt_t3 = t3")
@@ -465,6 +640,18 @@ func TestCompileParse(t *testing.T) {
 	// So(funcs, ShouldContainKey, exportPrefix+"t3m1")
 	// So(funcs, ShouldContainKey, "T4m1")
 	// So(funcs, ShouldContainKey, exportPrefix+"t5m1")
+}
+
+func formatNode(t *testing.T, fset *token.FileSet, node ast.Node) string {
+	if node == nil || node == (*ast.FuncLit)(nil) {
+		return ""
+	}
+
+	t.Helper()
+	b := &bytes.Buffer{}
+	err := format.Node(b, fset, node)
+	require.NoError(t, err)
+	return filterWhitespace(b.String())
 }
 
 // // Do some diagnostics (maybe) even if tests fail.
@@ -592,6 +779,29 @@ func TestValueOfMethod(t *testing.T) {
 		})
 		require.Error(t, err)
 	})
+}
+
+func _TestTypeAlias(t *testing.T) {
+	type (
+		I = int
+		F = float32
+	)
+
+	i := interp.New(interp.Options{})
+	i.Use(interp.Exports{
+		"pkg/pkg": {
+			"I": reflect.ValueOf((*I)(nil)),
+			"F": reflect.ValueOf((*F)(nil)),
+		},
+	})
+	i.ImportUsed()
+
+	_, err := i.Eval("func foo(i I) pkg.F { return pkg.F(i) }")
+	require.NoError(t, err)
+
+	res, err := i.Eval("foo(5)")
+	require.NoError(t, err)
+	assert.Equal(t, float32(5.0), res.Interface())
 }
 
 func TestReloadParse(t *testing.T) {

@@ -381,7 +381,7 @@ func filter(selfName string, args []string) {
 		log.Fatalf("%v", err)
 	}
 
-	// Write new source files, and a registration file,  for each package.
+	// Write new source files, and a registration file, for each package.
 	allImports := map[*packages.Package]int{}
 	for _, pkg := range r.Pkgs {
 		// Is this even possible?
@@ -446,8 +446,7 @@ func filter(selfName string, args []string) {
 		registrationSource, err := extract.GenContent(
 			pkg0.Name, pkg.Name, pkg.PkgPath, pkg.Types,
 			nil, nil,
-			//FIXME: needsAccessor, needsPublicType, needsPublicFuncWrapper
-			nil, nil, nil)
+			nil, nil, nil, nil)
 		if err != nil {
 			log.Fatalf("Failed generating symbol registration for %q: %v", pkg.PkgPath, err)
 		}
