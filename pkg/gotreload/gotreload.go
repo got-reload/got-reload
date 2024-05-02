@@ -363,6 +363,9 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 								},
 							}
 
+					case *ast.Field:
+						// ignore
+
 					default:
 						buf := bytes.Buffer{}
 						ast.Fprint(&buf, pkg.Fset, parent, ast.NotNilFilter)
