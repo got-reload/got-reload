@@ -163,7 +163,7 @@ type (
 )
 `)
 
-	// Parse this and print it out to figure out what to generate for the
+	// Parse this and print out its AST to figure out what to generate for the
 	// rewritten functions.
 	targetFile = mustFormat(`
 package target
@@ -479,9 +479,8 @@ func TestCompileParse(t *testing.T) {
 	r, _, _, output, _, registrations := rewrite("func f(a int) int { return a }")
 	assert.Contains(t, output, `func f(a int) int { return GRLfvar_f(a) }`)
 	assert.Contains(t, output, `var GRLfvar_f = func(a int) int { return a }`)
-	assert.Contains(t, output, `func GRLfset_f(f func(a int) int) { GRLfvar_f = f }`)
-	assert.Contains(t, r.setters, "GRLfset_f")
-	assert.Contains(t, registrations, `reflect.ValueOf(GRLfset_f)`) // incomplete check
+	assert.Contains(t, r.stubVars, "GRLfvar_f")
+	assert.Contains(t, registrations, `"GRLfvar_f": reflect.ValueOf(&GRLfvar_f).Elem()`)
 	// log.Printf("registrations:\n%s", registrations)
 
 	r, _, _, _, _, registrations = rewrite(`type t1 int; var v3 t1`)
@@ -549,29 +548,31 @@ func F8(a int, b float32) (int, float32) {
 
 	r.Rewrite(ModeReload)
 
-	funcEquals := func(funcKey, funcValue string) {
+	funcEquals := func(stubVar, funcValue string) {
 		t.Helper()
-		output := formatNode(t, pkg.Fset, r.NewFunc[r.Pkgs[0].PkgPath][funcKey])
+		output := formatNode(t, pkg.Fset, r.NewFunc[r.Pkgs[0].PkgPath][stubVar])
 		assert.Equal(t, funcValue, output)
 	}
 
-	funcEquals("GRLfset_F", "func() { *GRLuaddr_v3() = V4 }")
-	funcEquals("GRLfset_F2", "func() { V4 = *GRLuaddr_v3() V4 = *GRLuaddr_v3() + 5 V4 = 6 + *GRLuaddr_v3() }")
-	funcEquals("GRLfset_F3", "func() { var v_t2 GRLt_t2 V4 = *v_t2.GRLmaddr_t2_f1() }")
-	funcEquals("GRLfset_F4", `func() { fmt.Printf("%v %p %v %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4) }`)
-	funcEquals("GRLfset_F5", "func() { GRLuaddr_v6().Lock() }")
-	funcEquals("GRLfset_F6", "func() { **GRLuaddr_v7() += 0.1 }")
-	funcEquals("GRLfset_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
-	funcEquals("GRLfset_F8", "func(a int, b float32) (int, float32) { return a, b }")
+	funcEquals("GRLfvar_F", "func() { *GRLuaddr_v3() = V4 }")
+	funcEquals("GRLfvar_F2", "func() { V4 = *GRLuaddr_v3() V4 = *GRLuaddr_v3() + 5 V4 = 6 + *GRLuaddr_v3() }")
+	funcEquals("GRLfvar_F3", "func() { var v_t2 GRLt_t2 V4 = *v_t2.GRLmaddr_t2_f1() }")
+	funcEquals("GRLfvar_F4", `func() { fmt.Printf("%v %p %v %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4) }`)
+	funcEquals("GRLfvar_F5", "func() { GRLuaddr_v6().Lock() }")
+	funcEquals("GRLfvar_F6", "func() { **GRLuaddr_v7() += 0.1 }")
+	funcEquals("GRLfvar_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
+	funcEquals("GRLfvar_F8", "func(a int, b float32) (int, float32) { return a, b }")
 
-	// What should the rewritten target_func() look like, ast-wise?
-	fs := token.NewFileSet()
-	targetNode, err := parser.ParseFile(fs, "target", targetFile, parser.SkipObjectResolution)
-	require.NoError(t, err)
-	require.NotNil(t, targetNode)
-	buf := bytes.Buffer{}
-	ast.Fprint(&buf, fs, targetNode, ast.NotNilFilter)
-	t.Logf("target:\n%s", buf.String())
+	if false {
+		// What should the rewritten target_func() look like, ast-wise?
+		fs := token.NewFileSet()
+		targetNode, err := parser.ParseFile(fs, "target", targetFile, parser.SkipObjectResolution)
+		require.NoError(t, err)
+		require.NotNil(t, targetNode)
+		buf := bytes.Buffer{}
+		ast.Fprint(&buf, fs, targetNode, ast.NotNilFilter)
+		t.Logf("target:\n%s", buf.String())
+	}
 
 	// assert.NotContains(registrations, "T2 = T2")
 	// assert.Contains(registrations, "type GRLt_t3 = t3")

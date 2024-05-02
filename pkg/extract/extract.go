@@ -165,7 +165,7 @@ type Wrap struct {
 type FieldAccessor struct {
 	*types.Var
 	RType     string // receiver name
-	AddrName  string // setter name
+	AddrName  string // name of get-its-address func
 	FieldType string // name of type of field
 }
 
@@ -357,10 +357,10 @@ func GenContent(
 		}
 	}
 
-	// Create a val slot for all the generated setter functions (GRLset_XXX),
+	// Create a val slot for all the generated stubVar functions (GRLfvar_XXX),
 	// just like *types.Func above.
 	for name := range setFuncs {
-		val[name] = Val{name, false}
+		val[name] = Val{name, true}
 	}
 
 	if len(val) == 0 && len(typ) == 0 &&

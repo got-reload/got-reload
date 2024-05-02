@@ -219,35 +219,36 @@ func Start() {
 
 					// log.Printf("Looking for pkg %s", newPkg.PkgPath)
 					pkgPath := newR.Pkgs[0].PkgPath
-					pkgSetters := newR.NewFunc[newR.Pkgs[0].PkgPath]
+					stubVars := newR.NewFunc[newR.Pkgs[0].PkgPath]
 
 					log.Printf("Looking for setters in %s", pkgPath)
-					for setter := range pkgSetters {
-						log.Printf("Looking at setter & func %s", setter)
+					for stubVar := range stubVars {
+						log.Printf("Looking at %s", stubVar)
 
 						// Get a string version of the old function definition
-						origDef, err := r.FuncDef(pkgPath, setter)
+						origDef, err := r.FuncDef(pkgPath, stubVar)
 						if err != nil {
 							log.Printf("Error getting function definition of %s:%s: %v",
-								pkgPath, setter, err)
+								pkgPath, stubVar, err)
 							continue
 						}
 						// Get a string version of the new function definition
-						newDef, err := newR.FuncDef(pkgPath, setter)
+						newDef, err := newR.FuncDef(pkgPath, stubVar)
 						if err != nil {
 							log.Printf("Error getting function definition of %s:%s: %v",
-								pkgPath, setter, err)
+								pkgPath, stubVar, err)
 							continue
 						}
 
 						if origDef == newDef {
 							// If they're the same, don't do anything
-							// log.Printf("Skip %s", setter)
+							// log.Printf("Skip %s", stubVar)
 							continue
 						}
-						// log.Printf("Call %s: %s", setter, newDef)
+						log.Printf("%s is new", stubVar)
+						// log.Printf("Call %s: %s", stubVar, newDef)
 
-						// FIXME: use the same interpreter the whole time
+						// FIXME: Try using the same interpreter the whole time
 						i := interp.New(interp.Options{
 							GoPath: os.Getenv("GOPATH"),
 						})
@@ -278,22 +279,22 @@ func Start() {
 
 						i.ImportUsed()
 
-						eFunc := fmt.Sprintf(`%s.%s(%s)`, newPkg.Name, setter, newDef)
+						setStub := fmt.Sprintf(`%s = %s`, stubVar, newDef)
 
 						i.Eval(fmt.Sprintf(`
 package main
 import . %q
 func main() {
 	%s
-}`, newR.Pkgs[0].PkgPath, eFunc))
+}`, newR.Pkgs[0].PkgPath, setStub))
 
-						// log.Printf("Eval: %s", eFunc)
-						_, err = i.Eval(eFunc)
+						// log.Printf("Eval: %s", setStub)
+						_, err = i.Eval(setStub)
 						if err == nil {
-							log.Printf("Ran %s", setter)
+							log.Printf("Ran %s", stubVar)
 						} else {
 							log.Printf("Eval error: %v", err)
-							for i, line := range strings.Split(eFunc, "\n") {
+							for i, line := range strings.Split(setStub, "\n") {
 								// i+1 because any error (of course) takes into
 								// account the "package" (etc) lines.
 								log.Printf("%d: %s", i+1, line)

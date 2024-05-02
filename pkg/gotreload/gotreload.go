@@ -39,8 +39,8 @@ type (
 	Rewriter struct {
 		Config packages.Config
 		Pkgs   []*packages.Package
-		// Keys are PkgPath & setter name.  We use PkgPath as the key instead of
-		// a *packages.Package because we need to be able to find this across
+		// Keys are PkgPath & stubVar name.  We use PkgPath as the key instead
+		// of a *packages.Package because we need to be able to find this across
 		// different instances of Rewriter, where pointer values will be
 		// different, but package import paths, which are just strings, will be
 		// the same.
@@ -49,8 +49,8 @@ type (
 		// Per-package supplemental information.  Used only in initial rewrite.
 		Info map[*packages.Package]*Info
 
-		funcs   map[*ast.FuncDecl]string
-		setters map[string]bool
+		funcs    map[*ast.FuncDecl]string
+		stubVars map[string]bool
 		// var name -> its type's name
 		needsAccessor            map[string]string
 		needsPublicType          map[string]string
@@ -143,7 +143,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 
 	definedInThisPackage := map[types.Object]bool{}
 	r.funcs = map[*ast.FuncDecl]string{}
-	r.setters = map[string]bool{}
+	r.stubVars = map[string]bool{}
 	// This tags unexported variables to generate accessor functions. We
 	// *could* just generate new variables with the address of the unexported
 	// variable, but we need to generate accessor methods for struct fields
@@ -276,12 +276,13 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 	r.stubTopLevelFuncs(pkg, r.funcs, ModeRewrite)
 
 	// Generate symbol registrations
-	// log.Printf("Looking for setters for pkg %s", pkg.PkgPath)
-	for setter := range r.NewFunc[pkg.PkgPath] {
-		// log.Printf("Setter: %s", setter)
-		r.setters[setter] = true
+	// log.Printf("Looking for stubVars for pkg %s", pkg.PkgPath)
+	for stubVar := range r.NewFunc[pkg.PkgPath] {
+		// log.Printf("stubVar: %s", stubVar)
+		r.stubVars[stubVar] = true
 	}
-	registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types, r.setters,
+	registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types,
+		r.stubVars,
 		r.needsAccessor, r.needsPublicType, r.needsFieldAccessor, r.imports)
 	if err != nil {
 		return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
@@ -515,22 +516,16 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 
 					// log.Printf("Translating %s\n", name)
 
-					newVar, funcLit, setFunc := rewriteFunc(pkg.PkgPath, name, n)
-					if newVar != nil && setFunc != nil {
-						// These are like a stack, so in the emitted source, the
-						// current func will come first, then newVar, then setFunc.
-						c.InsertAfter(setFunc)
+					newVar, funcLit := rewriteFunc(pkg.PkgPath, name, n)
+					if newVar != nil {
 						c.InsertAfter(newVar)
 
-						// FIXME: Not sure this bit belongs only in Rewrite mode,
-						// or maybe not exactly this way
-
-						// Track setFunc => newVar
+						// Track stubVar => new function
 						if r.NewFunc[pkg.PkgPath] == nil {
 							r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
 						}
-						// log.Printf("Storing %s: %s", pkg.PkgPath, setFunc.Name.Name)
-						r.NewFunc[pkg.PkgPath][setFunc.Name.Name] = funcLit
+						// log.Printf("Storing %s: %s", pkg.PkgPath, stubPrefix+name)
+						r.NewFunc[pkg.PkgPath][stubPrefix+name] = funcLit
 					}
 				}
 			}
@@ -569,10 +564,10 @@ func (r *Rewriter) Print(root string) error {
 // AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
-func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncLit, *ast.FuncDecl) {
+func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncLit) {
 	// Don't rewrite generic functions, i.e., functions with type parameters
 	if node.Type.TypeParams != nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 
 	newVarType := copyFuncType(node.Type)
@@ -684,26 +679,9 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 				Names:  []*ast.Ident{{Name: stubPrefix + name}},
 				Values: []ast.Expr{funcLit}}}}
 
-	// Define the Set function
-	setFunc := &ast.FuncDecl{
-		Name: newIdent(setPrefix + name),
-		Type: &ast.FuncType{
-			Params: &ast.FieldList{
-				List: []*ast.Field{{
-					Names: []*ast.Ident{{Name: "f"}},
-					Type:  newVarType,
-				}}}},
-		Body: &ast.BlockStmt{
-			List: []ast.Stmt{
-				&ast.AssignStmt{
-					Lhs: []ast.Expr{newIdent(stubPrefix + name)},
-					Tok: token.ASSIGN,
-					Rhs: []ast.Expr{newIdent("f")},
-				}}}}
-
 	// Replace the node's body with the new body in-place.
 	node.Body = body
-	return newVar, funcLit, setFunc
+	return newVar, funcLit
 }
 
 func newSelector(x, sel string) *ast.SelectorExpr {
@@ -750,15 +728,15 @@ func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet,
 	return nil, nil, fmt.Errorf("File %s not found in parsed files", targetFileName)
 }
 
-func (r *Rewriter) FuncDef(pkgPath, setter string) (string, error) {
+func (r *Rewriter) FuncDef(pkgPath, stubVar string) (string, error) {
 	for _, pkg := range r.Pkgs {
 		if pkg.PkgPath != pkgPath {
 			continue
 		}
 		b := &bytes.Buffer{}
-		log.Printf("NewFunc[%s][%s]: %#v", pkgPath, setter, r.NewFunc[pkgPath][setter])
-		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][setter])
+		// log.Printf("NewFunc[%s][%s]", pkgPath, stubVar)
+		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][stubVar])
 		return b.String(), nil
 	}
-	return "", fmt.Errorf("No setter found for %s:%s", pkgPath, setter)
+	return "", fmt.Errorf("No stubVar found for %s:%s", pkgPath, stubVar)
 }
