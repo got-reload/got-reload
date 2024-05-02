@@ -214,27 +214,27 @@ var v7 = new(float32)
 
 func F() { 
 	v3 = V4
-	*fake.GRLuaddr_v3() = fake.V4
+	*GRLuaddr_v3() = V4
 	V4 = v3
-	fake.V4 = *fake.GRLuaddr_v3()
+	V4 = *GRLuaddr_v3()
 	V4 = v3 + 5
-	fake.V4 = *fake.GRLuaddr_v3() + 5
+	V4 = *GRLuaddr_v3() + 5
 
 	var v_t1 t1
 
 	v_t1.f1 = 5
 	*v_t1.GRLmaddr_t1_f1() = 5
-	fake.V4 = v_t1.f1
-	fake.V4 = *v_t1.GRLmaddr_t1_f1()
+	V4 = v_t1.f1
+	V4 = *v_t1.GRLmaddr_t1_f1()
 
 	fmt.Printf("%v, %p, %v, %p", v3, &v3, V4, &V4)
-	fmt.Printf("%v, %p, %v, %p", *fake.GRLuaddr_v3(), fake.GRLuaddr_v3(), fake.V4, &fake.V4)
+	fmt.Printf("%v, %p, %v, %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4)
 
 	v5.Lock()
-	fake.GRLuaddr_v5().Lock()
+	GRLuaddr_v5().Lock()
 
 	*v7 += 0.1
-	**fake.GRLuaddr_v7() += 0.1
+	**GRLuaddr_v7() += 0.1
 
 }
 
@@ -246,8 +246,8 @@ func F7(ctx ContextAlias) {
 	<-ctx.Done()
 }
 
-func F7_rewrite(ctx fake.ContextAlias) {
-	var ctx2 fake.ContextAlias
+func F7_rewrite(ctx ContextAlias) {
+	var ctx2 ContextAlias
 	_ = ctx2
 	<-ctx.Done()
 }
@@ -288,7 +288,7 @@ func example() {
 
 
 	var v GRLt_t11
-	var vE fake.GRLt_t11
+	var vE GRLt_t11
 	v2 := t11{
 		unexported_var: 5,
 		ExportedVar: 6.0,
@@ -354,31 +354,36 @@ func TestSampleFuncRewrites(t *testing.T) {
 	})
 	i.ImportUsed()
 
-	t.Run("pkg.V", func(t *testing.T) {
-		val, err := i.Eval("pkg.V")
+	t.Run(`import . "pkg"`, func(t *testing.T) {
+		_, err := i.Eval(`import . "pkg"`)
+		require.NoError(t, err)
+	})
+
+	t.Run("V", func(t *testing.T) {
+		val, err := i.Eval("V")
 		require.NoError(t, err)
 		assert.IsType(t, int(0), val.Interface())
 		assert.Equal(t, v, val.Interface().(int))
 	})
-	t.Run("pkg.GRLuaddr_v()", func(t *testing.T) {
-		val, err := i.Eval("pkg.GRLuaddr_v()")
+	t.Run("GRLuaddr_v()", func(t *testing.T) {
+		val, err := i.Eval("GRLuaddr_v()")
 		require.NoError(t, err)
 		assert.IsType(t, new(int), val.Interface())
 		assert.Equal(t, &v, val.Interface().(*int))
 	})
-	t.Run("*pkg.GRLuaddr_v()", func(t *testing.T) {
-		val, err := i.Eval("*pkg.GRLuaddr_v()")
+	t.Run("*GRLuaddr_v()", func(t *testing.T) {
+		val, err := i.Eval("*GRLuaddr_v()")
 		require.NoError(t, err)
 		assert.IsType(t, int(0), val.Interface())
 		assert.Equal(t, v, val.Interface().(int))
 	})
-	t.Run("*pkg.GRLuaddr_v() = 3", func(t *testing.T) {
-		_, err := i.Eval("*pkg.GRLuaddr_v() = 3")
+	t.Run("*GRLuaddr_v() = 3", func(t *testing.T) {
+		_, err := i.Eval("*GRLuaddr_v() = 3")
 		require.NoError(t, err)
 		assert.Equal(t, v, 3)
 	})
-	t.Run("*pkg.GRLuaddr_v() += 2", func(t *testing.T) {
-		_, err := i.Eval("*pkg.GRLuaddr_v() += 2")
+	t.Run("*GRLuaddr_v() += 2", func(t *testing.T) {
+		_, err := i.Eval("*GRLuaddr_v() += 2")
 		require.NoError(t, err)
 		assert.Equal(t, v, 5)
 	})
@@ -408,36 +413,6 @@ func TestEvalInPackage(t *testing.T) {
 }
 
 var notExported int = 5
-
-func TestUnexported(t *testing.T) {
-	i := interp.New(interp.Options{})
-	require.NotNil(t, i)
-
-	notExported = 0
-
-	i.Use(interp.Exports{
-		"pkg/pkg": {
-			"notExported": reflect.ValueOf(&notExported).Elem(),
-		},
-	})
-	i.ImportUsed()
-
-	// This is unexpected 😆
-	//
-	// I started a Q&A discussion about it in the Yaegi forum.
-	// https://github.com/traefik/yaegi/discussions/1626
-	t.Run("pkg.notExported", func(t *testing.T) {
-		val, err := i.Eval("pkg.notExported")
-		require.NoError(t, err)
-		assert.IsType(t, int(0), val.Interface())
-		assert.Equal(t, notExported, val.Interface().(int))
-	})
-	t.Run("pkg.notExported = 3", func(t *testing.T) {
-		_, err := i.Eval("pkg.notExported = 3")
-		require.NoError(t, err)
-		assert.Equal(t, notExported, 3)
-	})
-}
 
 func TestCompileParse(t *testing.T) {
 	cwd, err := os.Getwd()
@@ -515,6 +490,7 @@ func TestCompileParse(t *testing.T) {
 	r, pkg, _, output, _, registrations := rewrite(`
 import "fmt"
 import "sync"
+import "context"
 
 type t1 int
 type t2 struct {
@@ -579,14 +555,13 @@ func F8(a int, b float32) (int, float32) {
 		assert.Equal(t, funcValue, output)
 	}
 
-	funcEquals("GRLfset_F", "func() { *fake.GRLuaddr_v3() = fake.V4 }")
-	funcEquals("GRLfset_F2", "func() { fake.V4 = *fake.GRLuaddr_v3() fake.V4 = *fake.GRLuaddr_v3() + 5 fake.V4 = 6 + *fake.GRLuaddr_v3() }")
-	funcEquals("GRLfset_F3", "func() { var v_t2 fake.GRLt_t2 fake.V4 = *v_t2.GRLmaddr_t2_f1() }")
-	funcEquals("GRLfset_F4", `func() { fmt.Printf("%v %p %v %p", *fake.GRLuaddr_v3(), fake.GRLuaddr_v3(), fake.V4, &fake.V4) }`)
-	funcEquals("GRLfset_F5", "func() { fake.GRLuaddr_v6().Lock() }")
-	funcEquals("GRLfset_F6", "func() { **fake.GRLuaddr_v7() += 0.1 }")
-	// I dunno what's up with that trailing comma ...
-	funcEquals("GRLfset_F7", "func(ctx fake.ContextAlias,) { <-ctx.Done() var ctx2 fake.ContextAlias _ = ctx2 }")
+	funcEquals("GRLfset_F", "func() { *GRLuaddr_v3() = V4 }")
+	funcEquals("GRLfset_F2", "func() { V4 = *GRLuaddr_v3() V4 = *GRLuaddr_v3() + 5 V4 = 6 + *GRLuaddr_v3() }")
+	funcEquals("GRLfset_F3", "func() { var v_t2 GRLt_t2 V4 = *v_t2.GRLmaddr_t2_f1() }")
+	funcEquals("GRLfset_F4", `func() { fmt.Printf("%v %p %v %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4) }`)
+	funcEquals("GRLfset_F5", "func() { GRLuaddr_v6().Lock() }")
+	funcEquals("GRLfset_F6", "func() { **GRLuaddr_v7() += 0.1 }")
+	funcEquals("GRLfset_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
 	funcEquals("GRLfset_F8", "func(a int, b float32) (int, float32) { return a, b }")
 
 	// What should the rewritten target_func() look like, ast-wise?
@@ -776,7 +751,10 @@ func TestValueOfMethod(t *testing.T) {
 		})
 		i.ImportUsed()
 
-		res, err := i.Eval("pkg.TestType_m1(&pkg.Tt)")
+		_, err := i.Eval(`import . "pkg"`)
+		require.NoError(t, err)
+
+		res, err := i.Eval("TestType_m1(&Tt)")
 		require.NoError(t, err)
 		require.NotNil(t, res)
 		assert.Equal(t, 5, res.Interface())
@@ -794,11 +772,13 @@ func TestValueOfMethod(t *testing.T) {
 		})
 		i.ImportUsed()
 
+		_, err := i.Eval(`import . "pkg"`)
+		require.NoError(t, err)
+
 		// expected to fail: reflect: reflect.Value.Set using value obtained
 		// using unexported field
-		var err error
 		require.NotPanics(t, func() {
-			_, err = i.Eval("t2 := pkg.TestType{f1: 5} ; pkg.TestType_m1(&t2)")
+			_, err = i.Eval("t2 := TestType{f1: 5} ; TestType_m1(&t2)")
 		})
 		require.Error(t, err)
 	})

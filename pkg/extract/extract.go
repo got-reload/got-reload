@@ -194,7 +194,6 @@ func GenContent(
 	destPkg, basePkgName, importPath string,
 	p *types.Package,
 	setFuncs map[string]bool,
-	exported map[types.Object]bool,
 	needsAccessor map[string]string,
 	needsPublicType map[string]string,
 	// needsPublicFuncWrapper map[string]string,
@@ -243,9 +242,7 @@ func GenContent(
 
 	for _, name := range sc.Names() {
 		o := sc.Lookup(name)
-		if exported[o] {
-			name = "GRL_" + name
-		} else if !o.Exported() {
+		if !o.Exported() {
 			// log.Printf("%s is not imported, skipping it", name)
 			continue
 		}

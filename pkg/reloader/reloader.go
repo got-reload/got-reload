@@ -196,6 +196,8 @@ func Start() {
 					if err != nil {
 						log.Fatalf("Error rewriting package for %s: %v", change, err)
 					}
+					// FIXME: Have Rewrite w/ModeReload call ModeRewrite itself, or
+					// merge them in some better way.
 					err = newR.Rewrite(gotreload.ModeReload)
 					if err != nil {
 						log.Fatalf("Error reloading package for %s: %v", change, err)
@@ -276,9 +278,6 @@ func Start() {
 
 						i.ImportUsed()
 
-						// This really should be just a raw assignment (not a
-						// function call), but stock Yaegi currently doesn't
-						// support that. I've got a bug report in flight.
 						eFunc := fmt.Sprintf(`%s.%s(%s)`, newPkg.Name, setter, newDef)
 
 						i.Eval(fmt.Sprintf(`
@@ -293,8 +292,13 @@ func main() {
 						if err == nil {
 							log.Printf("Ran %s", setter)
 						} else {
-							log.Printf("Eval: %s", eFunc)
 							log.Printf("Eval error: %v", err)
+							for i, line := range strings.Split(eFunc, "\n") {
+								// i+1 because any error (of course) takes into
+								// account the "package" (etc) lines.
+								log.Printf("%d: %s", i+1, line)
+							}
+							log.Printf("Eval error (again): %v", err)
 						}
 					}
 
