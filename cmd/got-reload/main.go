@@ -461,6 +461,7 @@ func filter(selfName string, args []string) {
 	}
 }
 
+// Find all (direct and indirect) packages imported by pkg
 func allImportedPackages(m map[*packages.Package]int, pkg *packages.Package) {
 	if m[pkg] > 0 {
 		return

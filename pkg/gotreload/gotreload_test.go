@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/got-reload/got-reload/pkg/extract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/traefik/yaegi/interp"
@@ -309,8 +310,15 @@ func example() {
 var findWhitespace = regexp.MustCompile(`[ \n\t]+`)
 
 // Change all multiple space runs with a single space
-func filterWhitespace(s string) string {
-	return findWhitespace.ReplaceAllLiteralString(s, " ")
+func filterWhitespace[T []byte | string](w T) string {
+	switch thing := interface{}(w).(type) {
+	case string:
+		return findWhitespace.ReplaceAllLiteralString(thing, " ")
+	case []byte:
+		return string(findWhitespace.ReplaceAllLiteral(thing, []byte{' '}))
+	default:
+		panic("Unknown type in filterWhitespace")
+	}
 }
 
 func mustFormat(src string) string {
@@ -457,18 +465,25 @@ func TestCompileParse(t *testing.T) {
 		types := getTypes(file)
 		var registrations string
 		if r.Info[pkg] != nil && len(r.Info[pkg].Registrations) > 0 {
-			registrations = filterWhitespace(string(r.Info[pkg].Registrations))
+			registrations = string(r.Info[pkg].Registrations)
 		}
 
 		b := &bytes.Buffer{}
 		err = format.Node(b, pkg.Fset, file)
 		require.NoError(t, err)
-		output := filterWhitespace(b.String())
+		output := b.String()
 
 		return r, pkg, file, output, types, registrations
 	}
 
-	r, _, _, _, types, registrations := rewrite("type t1 int")
+	rewriteTrim := func(src string) (*Rewriter, *packages.Package, *ast.File, string, map[string]ast.Expr, string) {
+		r, pkg, file, output, types, registrations := rewrite(src)
+		output = filterWhitespace(output)
+		registrations = filterWhitespace(registrations)
+		return r, pkg, file, output, types, registrations
+	}
+
+	r, _, _, _, types, registrations := rewriteTrim("type t1 int")
 
 	// Types, variables, functions, and function bodies should translate correctly
 	assert.Contains(t, types, "t1")
@@ -476,25 +491,34 @@ func TestCompileParse(t *testing.T) {
 	assert.Equal(t, "GRLt_t1", r.needsPublicType["t1"])
 	assert.Contains(t, registrations, "type GRLt_t1 = t1")
 
-	r, _, _, output, _, registrations := rewrite("func f(a int) int { return a }")
+	r, _, _, output, _, registrations := rewriteTrim("func f(a int) int { return a }")
 	assert.Contains(t, output, `func f(a int) int { return GRLfvar_f(a) }`)
 	assert.Contains(t, output, `var GRLfvar_f = func(a int) int { return a }`)
 	assert.Contains(t, r.stubVars, "GRLfvar_f")
 	assert.Contains(t, registrations, `"GRLfvar_f": reflect.ValueOf(&GRLfvar_f).Elem()`)
 	// log.Printf("registrations:\n%s", registrations)
 
-	r, _, _, _, _, registrations = rewrite(`type t1 int; var v3 t1`)
+	r, _, _, _, _, registrations = rewriteTrim(`type t1 int; var v3 t1`)
 	assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
 
-	r, pkg, _, output, _, registrations := rewrite(`
-import "fmt"
-import "sync"
-import "context"
+	r, pkg, _, output, _, registrations := rewriteTrim(`
+import (
+	"fmt"
+	"sync"
+	"context"
+)
 
 type t1 int
 type t2 struct {
+	*t1
 	f1 t1
 	F2 int
+	f3 []int
+	f4 []*int
+	f5 []t1
+	f6 []*t1
+	f7 *[]*t1
+	f8 *[]*context.Context
 }
 var v3 t1
 var V4 t1
@@ -508,6 +532,10 @@ var v7 = new(float32)
 type M sync.Mutex
 
 type ContextAlias = context.Context
+
+var v8 = []int{}
+
+var v9 = (interface{})(2)
 
 func F() { v3 = V4 }
 func F2() { 
@@ -538,12 +566,22 @@ func F8(a int, b float32) (int, float32) {
 	return a, b
 }
 `)
-	assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
-	assert.Contains(t, registrations, `func GRLuaddr_v5() **float32 { return &v5 }`)
-	assert.Contains(t, registrations, `func GRLuaddr_v6() *sync.Mutex { return &v6 }`)
+	assert.Contains(t, registrations, "func GRLuaddr_v3() *t1 { return &v3 }")
+	assert.Contains(t, registrations, "func GRLuaddr_v5() **float32 { return &v5 }")
+	assert.Contains(t, registrations, "func GRLuaddr_v6() *sync.Mutex { return &v6 }")
+	assert.Contains(t, registrations, "func GRLuaddr_v8() *[]int { return &v8 }")
+	assert.Contains(t, registrations, "func GRLuaddr_v9() *interface{} { return &v9 }")
 	assert.Contains(t, registrations, `"sync"`)
 	assert.Contains(t, registrations, `"M": reflect.ValueOf((*M)(nil))`)
 	assert.Contains(t, registrations, `"ContextAlias": reflect.ValueOf((*ContextAlias)(nil))`)
+	assert.Contains(t, registrations, "func GRLuaddr_v8() *[]int { return &v8 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_t1() **t1 { return &r.t1 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f3() *[]int { return &r.f3 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f4() *[]*int { return &r.f4 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f5() *[]t1 { return &r.f5 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f6() *[]*t1 { return &r.f6 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f7() **[]*t1 { return &r.f7 }")
+	assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f8() **[]*context.Context { return &r.f8 }")
 	// log.Printf("registrations: %s", registrations)
 
 	r.Rewrite(ModeReload)
@@ -573,6 +611,23 @@ func F8(a int, b float32) (int, float32) {
 		ast.Fprint(&buf, fs, targetNode, ast.NotNilFilter)
 		t.Logf("target:\n%s", buf.String())
 	}
+
+	r, pkg, _, output, _, registrations = rewrite(`
+import (
+	"github.com/got-reload/got-reload/pkg/fake/dup1/dup"
+)
+
+var X dup.I
+`)
+	dupPkg := pkg.Imports["github.com/got-reload/got-reload/pkg/fake/dup1/dup"]
+	byt, err := extract.GenContent(
+		pkg.Name, dupPkg.Name, dupPkg.PkgPath, dupPkg.Types,
+		nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	// t.Logf("dup registrations:\n%s", byt)
+	registrations = filterWhitespace(byt)
+	assert.Contains(t, registrations, `"I": reflect.ValueOf((*dup.I)(nil)),`)
+	assert.Contains(t, registrations, `WF func() dup_0.SomeType`)
 
 	// assert.NotContains(registrations, "T2 = T2")
 	// assert.Contains(registrations, "type GRLt_t3 = t3")
@@ -678,6 +733,7 @@ func formatNode(t *testing.T, fset *token.FileSet, node ast.Node) string {
 // 	}
 // }()
 
+// Needs *a lot* of updating.
 func _TestFirstCompile(t *testing.T) {
 	const data = `package first
 

@@ -29,14 +29,11 @@ import (
 )
 
 const model = `
-
 package {{.Dest}}
 
 import (
 {{- range $key, $value := .Imports }}
-	{{- if $value}}
-	"{{$key}}"
-	{{- end}}
+	{{$value}} "{{$key}}"
 {{- end}}
 	"reflect"
 	"github.com/got-reload/got-reload/pkg/reloader"
@@ -198,7 +195,7 @@ func GenContent(
 	needsPublicType map[string]string,
 	// needsPublicFuncWrapper map[string]string,
 	needsFieldAccessor map[string]map[*types.Struct]FieldAccessor, // field name -> rtype name -> stuff
-	imports map[string]bool,
+	initialImports map[string]bool,
 ) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
@@ -207,51 +204,21 @@ func GenContent(
 	val := map[string]Val{}
 	wrap := map[string]Wrap{}
 	sc := p.Scope()
-	if imports == nil {
-		imports = map[string]bool{}
-	}
+	it := NewImportTracker(initialImports)
 
-	// pkgSeen := map[string]string{}
-	// pkgSeen[basePkgName] = importPath
-	// pkgDup := map[string]bool{}
-	importPathName := filepath.Base(importPath)
-	for _, pkg := range p.Imports() {
-		if pkg.Name() == importPathName {
-			log.Printf("Duplicate pkg names: %s, %s: %s, %s", destPkg, importPath, pkg.Name(), pkg.Path())
-			return nil, nil
-		}
-
-		// if prev, ok := pkgSeen[pkg.Name()]; ok {
-		// 	log.Printf("Duplicate pkg names: %s, %s: %s, %s; prev: %s", destPkg, importPath, pkg.Name(), pkg.Path(), prev)
-		// 	pkgDup[destPkg] = true
-		// 	// return nil, nil
-		// }
-		// pkgSeen[pkg.Name()] = pkg.Path()
-		if !imports[pkg.Path()] {
-			// log.Printf("Setting pkg %s to not imported (1)", pkg.Path())
-			imports[pkg.Path()] = false
-		}
-	}
 	qualify := func(pkg *types.Package) string {
-		if pkg.Path() != importPath {
-			// log.Printf("Setting pkg %s to imported (2)", pkg.Path())
-			imports[pkg.Path()] = true
-		}
-		return pkg.Name()
+		return it.getAlias(pkg.Name(), pkg.Path())
 	}
 
 	for _, name := range sc.Names() {
 		o := sc.Lookup(name)
 		if !o.Exported() {
-			// log.Printf("%s is not imported, skipping it", name)
 			continue
 		}
 
 		pkgPrefix := ""
 		if pkgName := o.Pkg().Name(); destPkg != pkgName {
-			// log.Printf("Setting pkg %s to imported (3)", importPath)
-			imports[importPath] = true
-			pkgPrefix = pkgName + "."
+			pkgPrefix = it.getAlias(o.Pkg().Name(), o.Pkg().Path()) + "."
 		}
 
 		pname := name
@@ -266,7 +233,7 @@ func GenContent(
 		case *types.Const:
 			if b, ok := o.Type().(*types.Basic); ok && (b.Info()&types.IsUntyped) != 0 {
 				// Convert untyped constant to right type to avoid overflow.
-				val[name] = Val{fixConst(pkgPrefix+pname, o.Val(), imports), false}
+				val[name] = Val{fixConst(pkgPrefix+pname, o.Val(), it), false}
 			} else {
 				val[name] = Val{pkgPrefix + pname, false}
 			}
@@ -293,6 +260,7 @@ func GenContent(
 				// log.Printf("type %s: %s: Underlying: %T, t.Underlying: %T",
 				// 	name, typ[name], o.Type().Underlying(), t.Underlying())
 				var methods []Method
+			METHOD:
 				for i := 0; i < t.NumMethods(); i++ {
 					f := t.Method(i)
 					if !f.Exported() {
@@ -320,13 +288,11 @@ func GenContent(
 
 								// If a method type is "internal", skip the method,
 								// and don't import the type's package.
-								if strings.Contains(n.Obj().Pkg().Path(), "/internal/") {
-									log.Printf("Internal path: %s", n.Obj().Pkg().Path())
-									imports[n.Obj().Pkg().Path()] = false
-									return nil, nil
-									// continue NAME
+								if pkg := n.Obj().Pkg(); pkg != nil && strings.Contains(pkg.Path(), "/internal/") {
+									// log.Printf("Internal path: %s", n.Obj().Pkg().Path())
+									it.noImport(pkg.Name(), pkg.Path())
+									continue METHOD
 								}
-
 							} else {
 								// log.Printf("method arg %d type %T: %s", j, v.Type(), types.TypeString(v.Type(), qualify))
 							}
@@ -406,18 +372,16 @@ func GenContent(
 
 	_, pkgName := path.Split(importPath)
 	b := new(bytes.Buffer)
-	// log.Printf("GenContent: ImportPath: %s", importPath)
 	data := map[string]interface{}{
-		"Dest":            destPkg,
-		"Imports":         imports,
-		"ImportPath":      importPath + "/" + pkgName,
-		"Val":             val,
-		"Typ":             typ,
-		"Wrap":            wrap,
-		"BuildTags":       buildTags,
-		"NeedsAccessor":   needsAccessor,
-		"NeedsPublicType": needsPublicType,
-		// "NeedsPublicFuncWrapper": needsPublicFuncWrapper,
+		"Dest":               destPkg,
+		"Imports":            it.alias,
+		"ImportPath":         importPath + "/" + pkgName,
+		"Val":                val,
+		"Typ":                typ,
+		"Wrap":               wrap,
+		"BuildTags":          buildTags,
+		"NeedsAccessor":      needsAccessor,
+		"NeedsPublicType":    needsPublicType,
 		"NeedsFieldAccessor": needsFieldAccessor,
 	}
 	err = parse.Execute(b, data)
@@ -433,8 +397,54 @@ func GenContent(
 	return source, nil
 }
 
+type importTracker struct {
+	seq      int
+	usedName map[string]bool   // key is package name or alias
+	alias    map[string]string // import path => alias (can be "")
+}
+
+func NewImportTracker(imports map[string]bool) *importTracker {
+	it := &importTracker{
+		usedName: map[string]bool{},
+		alias:    map[string]string{},
+	}
+
+	// pre-load with current imports
+	for i := range imports {
+		_ = it.getAlias(filepath.Base(i), i)
+	}
+
+	return it
+}
+
+func (it *importTracker) getAlias(name, path string) string {
+	if alias, ok := it.alias[path]; ok {
+		if alias == "" {
+			return name
+		}
+		return alias
+	}
+
+	// New package. Have we seen this pkg name already?
+	if it.usedName[name] {
+		alias := fmt.Sprintf("%s_%d", name, it.seq)
+		it.seq++
+		it.usedName[alias] = true
+		it.alias[path] = alias
+		return alias
+	}
+	it.usedName[name] = true
+	it.alias[path] = ""
+	return name
+}
+
+func (it *importTracker) noImport(name, path string) {
+	delete(it.alias, path)
+	delete(it.usedName, name)
+}
+
 // fixConst checks untyped constant value, converting it if necessary to avoid overflow.
-func fixConst(name string, val constant.Value, imports map[string]bool) string {
+func fixConst(name string, val constant.Value, it *importTracker) string {
 	var (
 		tok string
 		str string
@@ -462,10 +472,11 @@ func fixConst(name string, val constant.Value, imports map[string]bool) string {
 		return name
 	}
 
-	imports["go/constant"] = true
-	imports["go/token"] = true
+	constantAlias := it.getAlias("constant", "go/constant")
+	tokenAlias := it.getAlias("token", "go/token")
 
-	return fmt.Sprintf("constant.MakeFromLiteral(%q, token.%s, 0)", str, tok)
+	return fmt.Sprintf("%s.MakeFromLiteral(%q, %s.%s, 0)",
+		constantAlias, str, tokenAlias, tok)
 }
 
 // GetMinor returns the minor part of the version number.

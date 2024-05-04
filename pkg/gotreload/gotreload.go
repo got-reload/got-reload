@@ -181,15 +181,12 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 						if field.Exported() {
 							continue
 						}
-						var fieldTypeName string
-						switch oType := field.Type().(type) {
-						case *types.Basic:
-							fieldTypeName = oType.Name()
-						case *types.Named:
-							fieldTypeName = oType.Obj().Name()
-						default:
-							panic(fmt.Sprintf("Unknown var type (%s): %#v", field.Name(), obj.Type()))
-						}
+						fieldTypeName := types.TypeString(field.Type(), func(p *types.Package) string {
+							if p.Name() == pkg.Name {
+								return ""
+							}
+							return p.Name()
+						})
 						fieldName := field.Name()
 						methodName := methodUAddrPrefix + typeName.Name() + "_" + fieldName
 						// log.Printf("Tagging struct %s.%s for an addr method: %s", typeName.Name(), fieldName, methodName)
@@ -236,29 +233,13 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 			switch obj := obj.(type) {
 			case *types.Var:
 				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
-				switch oType := obj.Type().(type) {
-				case *types.Basic:
-					r.needsAccessor[ident.Name] = oType.Name()
-				case *types.Named:
-					// log.Printf("%s: named var type (%s): %#v, %s", pkg.Fset.Position(obj.Pos()), ident.Name, obj.Type(), oType.String())
-					if oType.Obj().Pkg().Name() == pkg.Name {
-						r.needsAccessor[ident.Name] = oType.Obj().Name()
-					} else {
-						// We need the package name of the type (for other packages,
-						// that is, packages that aren't the current package) to
-						// access unexported variables of that type, because the
-						// accessor function for this field needs to return that
-						// type.
-						r.needsAccessor[ident.Name] = fmt.Sprintf("%s.%s", oType.Obj().Pkg().Name(), oType.Obj().Name())
-						r.imports[oType.Obj().Pkg().Path()] = true
+				r.needsAccessor[ident.Name] = types.TypeString(obj.Type(), func(p *types.Package) string {
+					if p.Name() == pkg.Name {
+						return ""
 					}
-				case *types.Pointer:
-					// log.Printf("%s: pointer var type (%s): %#v", pkg.Fset.Position(obj.Pos()), ident.Name, obj.Type())
-					r.needsAccessor[ident.Name] = oType.String() // might be wrong, but works in some cases
-				default:
-					panic(fmt.Sprintf("%s: Unknown var type (%s): %#v",
-						pkg.Fset.Position(obj.Pos()), ident.Name, obj.Type()))
-				}
+					r.imports[p.Path()] = true
+					return p.Name()
+				})
 			case *types.TypeName:
 				public := utypePrefix + ident.Name
 				r.needsPublicType[ident.Name] = public
