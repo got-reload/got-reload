@@ -58,14 +58,6 @@ func init() {
 			"GRLuaddr_{{$var}}": reflect.ValueOf(GRLuaddr_{{$var}}),
 		{{end}}
 		{{- end}}
-		{{- if .NeedsFieldAccessor}}
-		// accessor methods for unexported struct fields
-		{{range $name, $s := .NeedsFieldAccessor -}}
-		{{range $type, $thing := $s -}}
-			"{{$thing.AddrName}}": reflect.ValueOf({{$thing.AddrName}}),
-		{{end}}
-		{{- end}}
-		{{- end}}
 
 		{{- if .Typ}}
 		// type definitions
@@ -187,8 +179,7 @@ func matchList(name string, list []string) (match bool, err error) {
 }
 
 func GenContent(
-	destPkg,
-	importPath string,
+	destPkg, importPath string,
 	p *types.Package,
 	setFuncs map[string]bool,
 	needsAccessor map[string]string,
