@@ -56,7 +56,6 @@ type (
 		needsPublicType          map[string]string
 		needsFieldAccessor       map[string]map[*types.Struct]extract.FieldAccessor // field name -> struct type -> stuff
 		needsPublicMethodWrapper map[string]bool                                    // not used?
-		imports                  map[string]bool
 	}
 
 	Info struct {
@@ -161,7 +160,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 	// needsPublicFuncWrapper := map[string]*types.Signature{}
 	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
 	r.needsPublicType = map[string]string{}
-	r.imports = map[string]bool{}
+	imports := extract.NewImportTracker(pkg.Name, pkg.PkgPath)
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
 			continue
@@ -182,10 +181,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 							continue
 						}
 						fieldTypeName := types.TypeString(field.Type(), func(p *types.Package) string {
-							if p.Name() == pkg.Name {
-								return ""
-							}
-							return p.Name()
+							return imports.GetAlias(p.Name(), p.Path())
 						})
 						fieldName := field.Name()
 						methodName := methodUAddrPrefix + typeName.Name() + "_" + fieldName
@@ -234,11 +230,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 			case *types.Var:
 				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
 				r.needsAccessor[ident.Name] = types.TypeString(obj.Type(), func(p *types.Package) string {
-					if p.Name() == pkg.Name {
-						return ""
-					}
-					r.imports[p.Path()] = true
-					return p.Name()
+					return imports.GetAlias(p.Name(), p.Path())
 				})
 			case *types.TypeName:
 				public := utypePrefix + ident.Name
@@ -262,9 +254,9 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 		// log.Printf("stubVar: %s", stubVar)
 		r.stubVars[stubVar] = true
 	}
-	registrationSource, err := extract.GenContent(pkg.Name, pkg.Name, pkg.PkgPath, pkg.Types,
+	registrationSource, err := extract.GenContent(pkg.Name, pkg.PkgPath, pkg.Types,
 		r.stubVars,
-		r.needsAccessor, r.needsPublicType, r.needsFieldAccessor, r.imports)
+		r.needsAccessor, r.needsPublicType, r.needsFieldAccessor, imports)
 	if err != nil {
 		return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
 	}
@@ -500,7 +492,7 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 
 					// log.Printf("Translating %s\n", name)
 
-					newVar, funcLit := rewriteFunc(pkg.PkgPath, name, n)
+					stubName, newVar, funcLit := rewriteFunc(pkg.PkgPath, name, n)
 					if newVar != nil {
 						c.InsertAfter(newVar)
 
@@ -509,7 +501,7 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 							r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
 						}
 						// log.Printf("Storing %s: %s", pkg.PkgPath, stubPrefix+name)
-						r.NewFunc[pkg.PkgPath][stubPrefix+name] = funcLit
+						r.NewFunc[pkg.PkgPath][stubName] = funcLit
 					}
 				}
 			}
@@ -548,10 +540,10 @@ func (r *Rewriter) Print(root string) error {
 // AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
-func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncLit) {
+func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl, *ast.FuncLit) {
 	// Don't rewrite generic functions, i.e., functions with type parameters
 	if node.Type.TypeParams != nil {
-		return nil, nil
+		return "", nil, nil
 	}
 
 	newVarType := copyFuncType(node.Type)
@@ -625,9 +617,10 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 	}
 	// log.Printf("rewriteFunc: %s: newArgs: %d, %v", name, len(newArgs), newArgs)
 
+	name = stubPrefix + name
 	// Define the new body of the function/method to just call the stub.
 	stubCall := &ast.CallExpr{
-		Fun:      newIdent(stubPrefix + name),
+		Fun:      newIdent(name),
 		Args:     newArgs,
 		Ellipsis: ellipsisPos,
 	}
@@ -660,12 +653,12 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 		Tok: token.VAR,
 		Specs: []ast.Spec{
 			&ast.ValueSpec{
-				Names:  []*ast.Ident{{Name: stubPrefix + name}},
+				Names:  []*ast.Ident{{Name: name}},
 				Values: []ast.Expr{funcLit}}}}
 
 	// Replace the node's body with the new body in-place.
 	node.Body = body
-	return newVar, funcLit
+	return name, newVar, funcLit
 }
 
 func newSelector(x, sel string) *ast.SelectorExpr {

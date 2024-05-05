@@ -20,7 +20,6 @@ import (
 	"math/big"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -188,14 +187,15 @@ func matchList(name string, list []string) (match bool, err error) {
 }
 
 func GenContent(
-	destPkg, basePkgName, importPath string,
+	destPkg,
+	importPath string,
 	p *types.Package,
 	setFuncs map[string]bool,
 	needsAccessor map[string]string,
 	needsPublicType map[string]string,
 	// needsPublicFuncWrapper map[string]string,
 	needsFieldAccessor map[string]map[*types.Struct]FieldAccessor, // field name -> rtype name -> stuff
-	initialImports map[string]bool,
+	imports *ImportTracker,
 ) ([]byte, error) {
 	prefix := "_" + importPath + "_"
 	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
@@ -204,21 +204,21 @@ func GenContent(
 	val := map[string]Val{}
 	wrap := map[string]Wrap{}
 	sc := p.Scope()
-	it := NewImportTracker(initialImports)
 
 	qualify := func(pkg *types.Package) string {
-		return it.getAlias(pkg.Name(), pkg.Path())
+		return imports.GetAlias(pkg.Name(), pkg.Path())
 	}
 
+NAME:
 	for _, name := range sc.Names() {
 		o := sc.Lookup(name)
 		if !o.Exported() {
 			continue
 		}
 
-		pkgPrefix := ""
-		if pkgName := o.Pkg().Name(); destPkg != pkgName {
-			pkgPrefix = it.getAlias(o.Pkg().Name(), o.Pkg().Path()) + "."
+		pkgPrefix := imports.GetAlias(o.Pkg().Name(), o.Pkg().Path())
+		if pkgPrefix != "" {
+			pkgPrefix += "."
 		}
 
 		pname := name
@@ -233,7 +233,7 @@ func GenContent(
 		case *types.Const:
 			if b, ok := o.Type().(*types.Basic); ok && (b.Info()&types.IsUntyped) != 0 {
 				// Convert untyped constant to right type to avoid overflow.
-				val[name] = Val{fixConst(pkgPrefix+pname, o.Val(), it), false}
+				val[name] = Val{fixConst(pkgPrefix+pname, o.Val(), imports), false}
 			} else {
 				val[name] = Val{pkgPrefix + pname, false}
 			}
@@ -290,7 +290,10 @@ func GenContent(
 								// and don't import the type's package.
 								if pkg := n.Obj().Pkg(); pkg != nil && strings.Contains(pkg.Path(), "/internal/") {
 									// log.Printf("Internal path: %s", n.Obj().Pkg().Path())
-									it.noImport(pkg.Name(), pkg.Path())
+									log.Printf("WARNING: Skipping method %s.%s; this may impact what interfaces this type implements",
+										typ[name], f.Name())
+
+									imports.NoImport(pkg.Name(), pkg.Path())
 									continue METHOD
 								}
 							} else {
@@ -302,12 +305,24 @@ func GenContent(
 					arg := "(" + strings.Join(args, ", ") + ")"
 					param := "(" + strings.Join(params, ", ") + ")"
 
+					hasInternal := false
+					qualify2 := func(pkg *types.Package) string {
+						if strings.Contains(pkg.Path(), "/internal/") {
+							hasInternal = true
+						}
+						return qualify(pkg)
+					}
+
 					results := make([]string, sign.Results().Len())
 					for j := range results {
 						v := sign.Results().At(j)
-						results[j] = v.Name() + " " + types.TypeString(v.Type(), qualify)
+						results[j] = v.Name() + " " + types.TypeString(v.Type(), qualify2)
 					}
 					result := "(" + strings.Join(results, ", ") + ")"
+
+					if hasInternal {
+						continue NAME
+					}
 
 					ret := ""
 					if sign.Results().Len() > 0 {
@@ -374,7 +389,7 @@ func GenContent(
 	b := new(bytes.Buffer)
 	data := map[string]interface{}{
 		"Dest":               destPkg,
-		"Imports":            it.alias,
+		"Imports":            imports.alias,
 		"ImportPath":         importPath + "/" + pkgName,
 		"Val":                val,
 		"Typ":                typ,
@@ -397,27 +412,34 @@ func GenContent(
 	return source, nil
 }
 
-type importTracker struct {
-	seq      int
-	usedName map[string]bool   // key is package name or alias
-	alias    map[string]string // import path => alias (can be "")
+type ImportTracker struct {
+	seq                int
+	baseName, basePath string
+	usedName           map[string]bool   // key is package name or alias
+	alias              map[string]string // import path => alias (can be "")
 }
 
-func NewImportTracker(imports map[string]bool) *importTracker {
-	it := &importTracker{
+func NewImportTracker(name, path string) *ImportTracker {
+	it := &ImportTracker{
+		baseName: name,
+		basePath: path,
 		usedName: map[string]bool{},
 		alias:    map[string]string{},
 	}
 
-	// pre-load with current imports
-	for i := range imports {
-		_ = it.getAlias(filepath.Base(i), i)
-	}
+	// pre-load with the base package
+	_ = it.GetAlias(name, path)
 
 	return it
 }
 
-func (it *importTracker) getAlias(name, path string) string {
+func (it *ImportTracker) GetAlias(name, path string) (retS string) {
+	// defer func() {
+	// 	log.Printf("getAlias: %s, %s => %q", name, path, retS)
+	// }()
+	if path == it.basePath {
+		return ""
+	}
 	if alias, ok := it.alias[path]; ok {
 		if alias == "" {
 			return name
@@ -438,13 +460,13 @@ func (it *importTracker) getAlias(name, path string) string {
 	return name
 }
 
-func (it *importTracker) noImport(name, path string) {
+func (it *ImportTracker) NoImport(name, path string) {
 	delete(it.alias, path)
 	delete(it.usedName, name)
 }
 
 // fixConst checks untyped constant value, converting it if necessary to avoid overflow.
-func fixConst(name string, val constant.Value, it *importTracker) string {
+func fixConst(name string, val constant.Value, it *ImportTracker) string {
 	var (
 		tok string
 		str string
@@ -472,8 +494,8 @@ func fixConst(name string, val constant.Value, it *importTracker) string {
 		return name
 	}
 
-	constantAlias := it.getAlias("constant", "go/constant")
-	tokenAlias := it.getAlias("token", "go/token")
+	constantAlias := it.GetAlias("constant", "go/constant")
+	tokenAlias := it.GetAlias("token", "go/token")
 
 	return fmt.Sprintf("%s.MakeFromLiteral(%q, %s.%s, 0)",
 		constantAlias, str, tokenAlias, tok)

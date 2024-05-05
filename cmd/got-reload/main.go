@@ -444,9 +444,10 @@ func filter(selfName string, args []string) {
 		}
 
 		registrationSource, err := extract.GenContent(
-			pkg0.Name, pkg.Name, pkg.PkgPath, pkg.Types,
+			pkg0.Name, pkg.PkgPath, pkg.Types,
 			nil,
-			nil, nil, nil, nil)
+			nil, nil, nil,
+			extract.NewImportTracker("", ""))
 		if err != nil {
 			log.Fatalf("Failed generating symbol registration for %q: %v", pkg.PkgPath, err)
 		}
