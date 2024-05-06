@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"fmt"
 	"go/constant"
-	"go/format"
 	"go/types"
 	"log"
 	"math/big"
@@ -25,6 +24,9 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"github.com/got-reload/got-reload/pkg/util"
+	goimports "golang.org/x/tools/imports"
 )
 
 const model = `
@@ -179,12 +181,12 @@ func matchList(name string, list []string) (match bool, err error) {
 }
 
 func GenContent(
+	destPath, // for goimports call
 	destPkg, importPath string,
 	p *types.Package,
 	setFuncs map[string]bool,
 	needsAccessor map[string]string,
 	needsPublicType map[string]string,
-	// needsPublicFuncWrapper map[string]string,
 	needsFieldAccessor map[string]map[*types.Struct]FieldAccessor, // field name -> rtype name -> stuff
 	imports *ImportTracker,
 ) ([]byte, error) {
@@ -279,10 +281,9 @@ NAME:
 
 								// If a method type is "internal", skip the method,
 								// and don't import the type's package.
-								if pkg := n.Obj().Pkg(); pkg != nil && strings.Contains(pkg.Path(), "/internal/") {
-									// log.Printf("Internal path: %s", n.Obj().Pkg().Path())
-									log.Printf("WARNING: Skipping method %s.%s; this may impact what interfaces this type implements",
-										typ[name], f.Name())
+								if pkg := n.Obj().Pkg(); pkg != nil && util.InternalPkg(pkg.Path()) {
+									log.Printf("WARNING: %s: Skipping method %s.%s; this may impact what interfaces this type implements",
+										n.Obj().Name(), typ[name], f.Name())
 
 									imports.NoImport(pkg.Name(), pkg.Path())
 									continue METHOD
@@ -298,9 +299,7 @@ NAME:
 
 					hasInternal := false
 					qualify2 := func(pkg *types.Package) string {
-						if strings.Contains(pkg.Path(), "/internal/") {
-							hasInternal = true
-						}
+						hasInternal = hasInternal || util.InternalPkg(pkg.Path())
 						return qualify(pkg)
 					}
 
@@ -395,11 +394,12 @@ NAME:
 		return nil, fmt.Errorf("template error: %w", err)
 	}
 
-	// gofmt
-	source, err := format.Source(b.Bytes())
+	// goimports, natch
+	source, err := goimports.Process(destPath, b.Bytes(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to format source: %w: %s", err, b.Bytes())
+		return nil, fmt.Errorf("failed to 'goimports' source: %w: %s", err, b.Bytes())
 	}
+
 	return source, nil
 }
 

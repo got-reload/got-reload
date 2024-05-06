@@ -625,7 +625,7 @@ import (
 var X dup.I
 `)
 		dupPkg := pkg.Imports["github.com/got-reload/got-reload/pkg/fake/dup1/dup"]
-		byt, err := extract.GenContent(
+		byt, err := extract.GenContent("github.com/got-reload/got-reload/pkg/fake",
 			pkg.Name, dupPkg.PkgPath, dupPkg.Types,
 			nil, nil, nil, nil, extract.NewImportTracker(pkg.Name, pkg.PkgPath))
 		require.NoError(t, err)
@@ -650,6 +650,31 @@ type s struct {
 `)
 		// t.Logf("fake registrations:\n%s", registrations)
 		assert.Contains(t, registrations, "func (r *s) GRLmaddr_s_f1() *fake.T { return &r.f1 }")
+	}
+
+	// Test internal packages, and unused-import-removal:
+	// - private methods that have them in their signature cannot be replaced
+	//   from the "main" package, so we shouldn't even filter them.
+	// - Since we shouldn't filter getF,
+	{
+		_, _, _, output, _, registrations := rewrite(`
+import (
+	"github.com/got-reload/got-reload/pkg/fake/internal"
+	"sync/atomic"
+)
+
+type T struct {
+	f internal.T
+}
+
+func (t *T) F(b atomic.Bool) internal.T { return t.f }
+`)
+		t.Logf("fake registrations:\n%s", registrations)
+		assert.NotContains(t, registrations, `"GRLfvar_T_F": reflect.ValueOf(&GRLfvar_T_F).Elem()`)
+		assert.NotContains(t, registrations, `func (r *T) GRLmaddr_T_f() *internal.T { return &r.f }`)
+
+		t.Logf("fake output:\n%s", output)
+		assert.NotContains(t, output, "var GRLfvar_T_F")
 	}
 
 	if false {
