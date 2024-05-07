@@ -69,7 +69,7 @@ func init() {
 		{{- end}}
 
 		{{if .NeedsPublicType -}}
-		// type aliases to export unexported types
+		// type aliases to export unexported or internal types
 		{{range $unexportedName, $exportedName := .NeedsPublicType -}}
 		"{{$exportedName}}": reflect.ValueOf((*{{$unexportedName}})(nil)),
 		{{end}}
@@ -282,6 +282,12 @@ NAME:
 								// If a method type is "internal", skip the method,
 								// and don't import the type's package.
 								if pkg := n.Obj().Pkg(); pkg != nil && util.InternalPkg(pkg.Path()) {
+									// TODO: Not sure this error prints the actual
+									// thing it's upset about.
+									//
+									// Also not sure if we shouldn't just skip the
+									// whole interface, if we can't wrap every method
+									// in it.
 									log.Printf("WARNING: %s: Skipping method %s.%s; this may impact what interfaces this type implements",
 										n.Obj().Name(), typ[name], f.Name())
 

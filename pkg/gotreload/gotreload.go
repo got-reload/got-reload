@@ -16,7 +16,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/got-reload/got-reload/pkg/extract"
-	"github.com/got-reload/got-reload/pkg/util"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 )
@@ -171,29 +170,36 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 		}
 		// log.Printf("Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
 		if typeName, ok := obj.(*types.TypeName); ok {
-			// This doesn't work and may be wrong?
-			// if typeName.Pkg().Path() != pkg.PkgPath {
-			// 	continue
-			// }
-			// log.Printf("Def path: %s: %s", typeName.Name(), typeName.Pkg().Path())
-
 			if named, ok := typeName.Type().(*types.Named); ok {
+				publicTypeName := typeName.Name()
+				// if !named.Obj().Exported() {
+				// 	publicTypeName = utypePrefix + publicTypeName
+				// 	r.needsPublicType[typeName.Name()] = publicTypeName
+				// }
+
 				if s, ok := named.Underlying().(*types.Struct); ok {
 					for i := 0; i < s.NumFields(); i++ {
 						field := s.Field(i)
 						if field.Exported() {
 							continue
 						}
-						hasInternal := false
+						// if named, ok := field.Type().(*types.Named); ok && !named.Obj().Exported() {
+						// 	log.Printf("WARNING: Skipping %s.%s: type not exported", ident.Name, field.Name())
+						// 	continue
+						// }
+
+						// hasInternal := false
 						fieldTypeName := types.TypeString(field.Type(), func(p *types.Package) string {
-							hasInternal = hasInternal || util.InternalPkg(p.Path())
+							// hasInternal = hasInternal || util.InternalPkg(p.Path())
 							return imports.GetAlias(p.Name(), p.Path())
 						})
-						if hasInternal {
-							log.Printf("WARNING: Skipping accessor for %s.%s since it requires a type from an internal package",
-								typeName.Name(), field.Name())
-							continue
-						}
+						// if hasInternal {
+						// publicTypeName = utypePrefix + "internal_" + publicTypeName
+						// r.needsPublicType[typeName.Name()] = publicTypeName
+						// log.Printf("WARNING: Skipping accessor for %s.%s since it requires a type from an internal package",
+						// 	typeName.Name(), field.Name())
+						// continue
+						// }
 
 						fieldName := field.Name()
 						methodName := methodUAddrPrefix + typeName.Name() + "_" + fieldName
@@ -203,7 +209,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 						}
 						r.needsFieldAccessor[fieldName][s] = extract.FieldAccessor{
 							Var:       field,
-							RType:     typeName.Name(),
+							RType:     publicTypeName,
 							AddrName:  methodName,
 							FieldType: fieldTypeName,
 						}
@@ -241,9 +247,16 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 			switch obj := obj.(type) {
 			case *types.Var:
 				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
+				// if named, ok := obj.Type().(*types.Named); ok {
+				// _ = named
+				// if named.Obj().Exported() {
 				r.needsAccessor[ident.Name] = types.TypeString(obj.Type(), func(p *types.Package) string {
 					return imports.GetAlias(p.Name(), p.Path())
 				})
+				// } else {
+				// 	log.Printf("WARNING: Skipping accessor function for %s: Its return type is not exported", ident.Name)
+				// }
+				// }
 			case *types.TypeName:
 				public := utypePrefix + ident.Name
 				r.needsPublicType[ident.Name] = public

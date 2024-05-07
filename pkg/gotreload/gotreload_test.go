@@ -663,18 +663,22 @@ import (
 	"sync/atomic"
 )
 
-type T struct {
+type T2 struct {
 	f internal.T
 }
 
-func (t *T) F(b atomic.Bool) internal.T { return t.f }
+func (t *T2) F(b atomic.Bool) internal.T { return t.f }
 `)
 		t.Logf("fake registrations:\n%s", registrations)
-		assert.NotContains(t, registrations, `"GRLfvar_T_F": reflect.ValueOf(&GRLfvar_T_F).Elem()`)
-		assert.NotContains(t, registrations, `func (r *T) GRLmaddr_T_f() *internal.T { return &r.f }`)
+		assert.Contains(t, registrations, `"GRLfvar_T2_F": reflect.ValueOf(&GRLfvar_T2_F).Elem()`)
+		assert.Contains(t, registrations, `func (r *T2) GRLmaddr_T2_f() *internal.T { return &r.f }`)
 
 		t.Logf("fake output:\n%s", output)
-		assert.NotContains(t, output, "var GRLfvar_T_F")
+		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal.T { return GRLfvar_T2_F(t, b) }")
+		assert.Contains(t, output, "var GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T { return t.f }")
+
+		// Needs something that tests the reload phase and shows something like
+		// assert.Contains(t, ???, "GRLfvar_T2_F = func(t *T2, b atomic.Bool) GRLt_internal_t { /* some new code */ return t.f }")
 	}
 
 	if false {
