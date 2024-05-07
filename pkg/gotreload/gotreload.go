@@ -167,25 +167,50 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
 	r.needsPublicType = map[string]string{}
 	imports := extract.NewImportTracker(pkg.Name, pkg.PkgPath)
+DEFS:
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
 			continue
 		}
 		// log.Printf("Rewrite: Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
 		if typeName, ok := obj.(*types.TypeName); ok {
+			// if typeName.Name() == "myTime" {
+			// 	log.Printf("Rewrite: TypeName Def: %#v, Obj: %#v, Parent: %#v", ident, obj, obj.Parent())
+			// }
 			if named, ok := typeName.Type().(*types.Named); ok {
+				// log.Printf("Rewrite: Named Def: %#v, Obj: %#v, TypeString: %s, Underlying: %#v",
+				// 	named, named.Obj(), types.TypeString(typeName.Type(), nil), named.Underlying())
+
+				for n, p := 0, obj.Parent(); p != nil; p = p.Parent() {
+					// log.Printf("Parent: %d: %#v", n, p)
+					n++
+					if n > 2 {
+						// log.Printf("WARNING: Not generating accessors for type %q", ident.Name)
+						continue DEFS
+					}
+				}
+
 				publicTypeName := typeName.Name()
 				// if !named.Obj().Exported() {
 				// 	publicTypeName = utypePrefix + publicTypeName
 				// 	r.needsPublicType[typeName.Name()] = publicTypeName
 				// }
 
+				// log.Printf("Rewrite: Named Def: %#v, Obj: %#v, TypeString: %s", named, named.Obj(), types.TypeString(typeName.Type(), nil))
 				if s, ok := named.Underlying().(*types.Struct); ok {
 					for i := 0; i < s.NumFields(); i++ {
 						field := s.Field(i)
 						if field.Exported() {
 							continue
 						}
+						// This is an unexported field of a struct from some other
+						// package, e.g. given "type myTime time.Time; var t
+						// myTime", t.wall, or t.ext, or t.loc.
+						if field.Pkg() != pkg.Types {
+							// log.Printf("Skipping Var %d: %#v, pkg: %#v", i, field, field.Pkg().Path())
+							continue
+						}
+
 						// if named, ok := field.Type().(*types.Named); ok && !named.Obj().Exported() {
 						// 	log.Printf("WARNING: Skipping %s.%s: type not exported", ident.Name, field.Name())
 						// 	continue
@@ -249,17 +274,27 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 		if !obj.Exported() {
 			switch obj := obj.(type) {
 			case *types.Var:
-				// log.Printf("%s: type: %#v", ident.Name, obj.Type())
-				// if named, ok := obj.Type().(*types.Named); ok {
-				// _ = named
-				// if named.Obj().Exported() {
-				r.needsAccessor[ident.Name] = types.TypeString(obj.Type(), func(p *types.Package) string {
+				// log.Printf("%s: type: %#v", ident.Name, obj)
+
+				typeName := types.TypeString(obj.Type(), func(p *types.Package) string {
 					return imports.GetAlias(p.Name(), p.Path())
 				})
-				// } else {
-				// 	log.Printf("WARNING: Skipping accessor function for %s: Its return type is not exported", ident.Name)
-				// }
-				// }
+				// What I want is: Is the type from the current package, or if it
+				// isn't, is the typename exported? So: If it doesn't have a ".",
+				// it's fine, or if it does, if the character after the dot is
+				// "exported", then set it as needing an accessor.
+				//
+				// I'd really rather walk the type tree, but that would require
+				// duplicating rather a lot of types.TypeString, which I'd rather
+				// avoid.
+				//
+				// To my surprise there's nothing like a "walk" function for a
+				// type tree. If there is, TypeString doesn't use it.
+				if index := strings.Index(typeName, "."); index == -1 ||
+					len(typeName) > index && token.IsExported(typeName[index+1:]) {
+
+					r.needsAccessor[ident.Name] = typeName
+				}
 			case *types.TypeName:
 				public := utypePrefix + ident.Name
 				r.needsPublicType[ident.Name] = public

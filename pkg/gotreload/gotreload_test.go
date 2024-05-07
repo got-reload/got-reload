@@ -173,11 +173,19 @@ import "sync"
 import "context"
 
 func target_func(arg ...int) int {
-	return GRLfvar_target_func(arg...)
+	return arg[0]
 }
 
-var GRLfvar_target_func = func(arg ...int) int {
-	return arg[0]
+func target_func2(arg ...int) int {
+	return GRLfvar_target_func2(arg...)
+}
+
+var GRLfvar_target_func2 func(arg ...int) int
+
+func init() {
+	GRLfvar_target_func2 = func(arg ...int) int {
+		return arg[0]
+	}
 }
 
 type T10 struct {
@@ -651,7 +659,7 @@ type s struct {
 	}
 
 	{
-		_, _, _, output, _, registrations := rewrite(`
+		_, _, _, output, _, registrations := rewriteTrim(`
 import (
 	"github.com/got-reload/got-reload/pkg/fake/internal"
 	"sync/atomic"
@@ -706,7 +714,45 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
 		// in *different* internal packages, sigh.
 	}
 
-	if false {
+	// No registration for a variable of an exported type.
+	{
+		_, _, _, _, _, registrations := rewriteTrim(`
+import (
+	"github.com/got-reload/got-reload/pkg/fake/other"
+)
+
+var unexportedVar = other.F()
+`)
+		// t.Logf("fake registrations:\n%s", registrations)
+		assert.NotContains(t, registrations, "func GRLuaddr_unexportedVar")
+	}
+
+	{
+		_, _, _, _, _, registrations := rewriteTrim(`
+func F() {
+	type foo_bar struct {
+		foo int
+		bar float32
+	}
+}
+
+type foo_baz struct { foo int; baz float32 }
+
+`)
+		// t.Logf("fake registrations:\n%s", registrations)
+		assert.NotContains(t, registrations, `func (r *foo_bar)`)
+		assert.Contains(t, registrations, `func (r *foo_baz)`)
+	}
+
+	// If you declare "type foo time.Time", make sure we don't generate
+	// accessors for foo.wall and so on.
+	{
+		_, _, _, _, _, registrations := rewriteTrim(`import "time"; type myTime time.Time`)
+		// t.Logf("fake registrations:\n%s", registrations)
+		assert.NotContains(t, registrations, "func (r *myTime)")
+	}
+
+	if true {
 		// What should the rewritten target_func() look like, ast-wise?
 		fs := token.NewFileSet()
 		targetNode, err := parser.ParseFile(fs, "target", targetFile, parser.SkipObjectResolution)
