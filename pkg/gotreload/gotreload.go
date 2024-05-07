@@ -602,8 +602,9 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 
 					// log.Printf("Translating %s\n", name)
 
-					stubName, newVar, funcLit := rewriteFunc(pkg.PkgPath, name, n)
+					stubName, newVar, newInit, funcLit := rewriteFunc(pkg.PkgPath, name, n)
 					if newVar != nil {
+						c.InsertAfter(newInit)
 						c.InsertAfter(newVar)
 
 						// Track stubVar => new function
@@ -650,10 +651,10 @@ func (r *Rewriter) Print(root string) error {
 // AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
-func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl, *ast.FuncLit) {
+func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl, *ast.FuncDecl, *ast.FuncLit) {
 	// Don't rewrite generic functions, i.e., functions with type parameters
 	if node.Type.TypeParams != nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 
 	newVarType := copyFuncType(node.Type)
@@ -763,12 +764,25 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 		Tok: token.VAR,
 		Specs: []ast.Spec{
 			&ast.ValueSpec{
-				Names:  []*ast.Ident{{Name: name}},
-				Values: []ast.Expr{funcLit}}}}
+				Names: []*ast.Ident{{Name: name}},
+				Type:  newVarType,
+			}}}
+
+	newInit := &ast.FuncDecl{
+		Name: &ast.Ident{Name: "init"},
+		Type: &ast.FuncType{Params: &ast.FieldList{}},
+		Body: &ast.BlockStmt{
+			List: []ast.Stmt{
+				&ast.AssignStmt{
+					Lhs: []ast.Expr{
+						&ast.Ident{Name: name}},
+					Tok: token.ASSIGN,
+					Rhs: []ast.Expr{
+						funcLit}}}}}
 
 	// Replace the node's body with the new body in-place.
 	node.Body = body
-	return name, newVar, funcLit
+	return name, newVar, newInit, funcLit
 }
 
 func newSelector(x, sel string) *ast.SelectorExpr {

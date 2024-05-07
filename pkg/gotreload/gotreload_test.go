@@ -496,10 +496,12 @@ func TestCompileParse(t *testing.T) {
 	{
 		r, _, _, output, _, registrations := rewriteTrim("func f(a int) int { return a }")
 		assert.Contains(t, output, `func f(a int) int { return GRLfvar_f(a) }`)
-		assert.Contains(t, output, `var GRLfvar_f = func(a int) int { return a }`)
+		assert.Contains(t, output, `var GRLfvar_f func(a int) int`)
+		assert.Contains(t, output, `func init() { GRLfvar_f = func(a int) int { return a } }`)
 		assert.Contains(t, r.stubVars, "GRLfvar_f")
 		assert.Contains(t, registrations, `"GRLfvar_f": reflect.ValueOf(&GRLfvar_f).Elem()`)
 		// log.Printf("registrations:\n%s", registrations)
+		// log.Printf("output:\n%s", output)
 	}
 
 	{
@@ -593,7 +595,8 @@ func F8(a int, b float32) (int, float32) {
 		assert.Contains(t, registrations, "func GRLuaddr_v8() *[]int { return &v8 }")
 		assert.Contains(t, registrations, "func GRLuaddr_v9() *interface{} { return &v9 }")
 		assert.Contains(t, registrations, `"GRLfvar_t2_T2_method": reflect.ValueOf(&GRLfvar_t2_T2_method).Elem(),`)
-		assert.Contains(t, output, "var GRLfvar_t2_T2_method = func(r *t2) int { return 0 }")
+		assert.Contains(t, output, "var GRLfvar_t2_T2_method func(r *t2) int")
+		assert.Contains(t, output, "func init() { GRLfvar_t2_T2_method = func(r *t2) int { return 0 } }")
 		assert.Contains(t, registrations, `"sync"`)
 		assert.Contains(t, registrations, `"M": reflect.ValueOf((*M)(nil))`)
 		assert.Contains(t, registrations, `"ContextAlias": reflect.ValueOf((*ContextAlias)(nil))`)
@@ -677,7 +680,8 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f }
 
 		// t.Logf("fake output:\n%s", output)
 		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return GRLfvar_T2_F(t, b) }")
-		assert.Contains(t, output, "var GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T_thisIsInternal { return t.f }")
+		assert.Contains(t, output, "var GRLfvar_T2_F func(t *T2, b atomic.Bool) internal.T_thisIsInternal")
+		assert.Contains(t, output, "func init() { GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T_thisIsInternal { return t.f } }")
 
 		// Change T2.F and reload
 		//
@@ -752,7 +756,7 @@ type foo_baz struct { foo int; baz float32 }
 		assert.NotContains(t, registrations, "func (r *myTime)")
 	}
 
-	if true {
+	if false {
 		// What should the rewritten target_func() look like, ast-wise?
 		fs := token.NewFileSet()
 		targetNode, err := parser.ParseFile(fs, "target", targetFile, parser.SkipObjectResolution)
