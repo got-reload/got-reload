@@ -105,6 +105,8 @@ func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 
 var rMux sync.Mutex
 
+// StartWatching returns a channel and a new gotreload.Rewriter. The channel
+// emits a series of filenames (absolute paths) that've changed.
 func StartWatching(list []string) (<-chan string, *gotreload.Rewriter) {
 	r := gotreload.NewRewriter()
 	r.Config.Dir = os.Getenv(SourceDirEnv)

@@ -421,6 +421,7 @@ var notExported int = 5
 func TestCompileParse(t *testing.T) {
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
+	path := path.Dir(cwd) + "/fake"
 	// t.Logf("Getwd: %s, %v", cwd, err)
 
 	rewrite := func(src string) (*Rewriter, *packages.Package, *ast.File, string, map[string]ast.Expr, string) {
@@ -436,13 +437,12 @@ func TestCompileParse(t *testing.T) {
 		// }
 
 		// Replace the fake t1 with our testfile data.
-		path := path.Dir(cwd) + "/fake"
 		r.Config.Overlay = map[string][]byte{
 			path + "/t1.go": []byte("package fake; " + src),
 			path + "/t2.go": []byte("package fake"),
 		}
 
-		err = r.Load("../fake")
+		err := r.Load("../fake")
 		require.NoError(t, err)
 		require.NotNil(t, r.Pkgs)
 
@@ -451,10 +451,6 @@ func TestCompileParse(t *testing.T) {
 		require.NotNil(t, r.Pkgs)
 		require.NotZero(t, len(r.Pkgs))
 		pkg := r.Pkgs[0]
-		// require.NotZero(t, len(r.Info))
-		// require.Contains(t, r.Info, pkg)
-		// require.NotNil(t, r.Info[pkg])
-		// require.NotNil(t, r.Info[pkg].Registrations)
 
 		require.NotZero(t, len(pkg.Syntax))
 		file := pkg.Syntax[0]
@@ -503,8 +499,15 @@ func TestCompileParse(t *testing.T) {
 		assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
 	}
 
+	funcEquals := func(r *Rewriter, stubVar, funcValue string) {
+		t.Helper()
+		pkg := r.Pkgs[0]
+		output := formatNode(t, pkg.Fset, r.NewFunc[pkg.PkgPath][stubVar])
+		assert.Equal(t, funcValue, output)
+	}
+
 	{
-		r, pkg, _, output, _, registrations := rewriteTrim(`
+		r, _, _, output, _, registrations := rewriteTrim(`
 import (
 	"fmt"
 	"sync"
@@ -598,22 +601,17 @@ func F8(a int, b float32) (int, float32) {
 		assert.Contains(t, registrations, `"sync/atomic"`)
 		// log.Printf("registrations: %s", registrations)
 
-		r.Rewrite(ModeReload)
+		err := r.Rewrite(ModeReload)
+		require.NoError(t, err)
 
-		funcEquals := func(stubVar, funcValue string) {
-			t.Helper()
-			output := formatNode(t, pkg.Fset, r.NewFunc[r.Pkgs[0].PkgPath][stubVar])
-			assert.Equal(t, funcValue, output)
-		}
-
-		funcEquals("GRLfvar_F", "func() { *GRLuaddr_v3() = V4 }")
-		funcEquals("GRLfvar_F2", "func() { V4 = *GRLuaddr_v3() V4 = *GRLuaddr_v3() + 5 V4 = 6 + *GRLuaddr_v3() }")
-		funcEquals("GRLfvar_F3", "func() { var v_t2 GRLt_t2 V4 = *v_t2.GRLmaddr_t2_f1() }")
-		funcEquals("GRLfvar_F4", `func() { fmt.Printf("%v %p %v %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4) }`)
-		funcEquals("GRLfvar_F5", "func() { GRLuaddr_v6().Lock() }")
-		funcEquals("GRLfvar_F6", "func() { **GRLuaddr_v7() += 0.1 }")
-		funcEquals("GRLfvar_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
-		funcEquals("GRLfvar_F8", "func(a int, b float32) (int, float32) { return a, b }")
+		funcEquals(r, "GRLfvar_F", "func() { *GRLuaddr_v3() = V4 }")
+		funcEquals(r, "GRLfvar_F2", "func() { V4 = *GRLuaddr_v3() V4 = *GRLuaddr_v3() + 5 V4 = 6 + *GRLuaddr_v3() }")
+		funcEquals(r, "GRLfvar_F3", "func() { var v_t2 GRLt_t2 V4 = *v_t2.GRLmaddr_t2_f1() }")
+		funcEquals(r, "GRLfvar_F4", `func() { fmt.Printf("%v %p %v %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4) }`)
+		funcEquals(r, "GRLfvar_F5", "func() { GRLuaddr_v6().Lock() }")
+		funcEquals(r, "GRLfvar_F6", "func() { **GRLuaddr_v7() += 0.1 }")
+		funcEquals(r, "GRLfvar_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
+		funcEquals(r, "GRLfvar_F8", "func(a int, b float32) (int, float32) { return a, b }")
 	}
 
 	{
@@ -652,10 +650,6 @@ type s struct {
 		assert.Contains(t, registrations, "func (r *s) GRLmaddr_s_f1() *fake.T { return &r.f1 }")
 	}
 
-	// Test internal packages, and unused-import-removal:
-	// - private methods that have them in their signature cannot be replaced
-	//   from the "main" package, so we shouldn't even filter them.
-	// - Since we shouldn't filter getF,
 	{
 		_, _, _, output, _, registrations := rewrite(`
 import (
@@ -664,21 +658,52 @@ import (
 )
 
 type T2 struct {
-	f internal.T
+	f internal.T_thisIsInternal
 }
 
-func (t *T2) F(b atomic.Bool) internal.T { return t.f }
+func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f }
 `)
-		t.Logf("fake registrations:\n%s", registrations)
+		// t.Logf("fake registrations:\n%s", registrations)
 		assert.Contains(t, registrations, `"GRLfvar_T2_F": reflect.ValueOf(&GRLfvar_T2_F).Elem()`)
-		assert.Contains(t, registrations, `func (r *T2) GRLmaddr_T2_f() *internal.T { return &r.f }`)
+		assert.Contains(t, registrations, `func (r *T2) GRLmaddr_T2_f() *internal.T_thisIsInternal { return &r.f }`)
 
-		t.Logf("fake output:\n%s", output)
-		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal.T { return GRLfvar_T2_F(t, b) }")
-		assert.Contains(t, output, "var GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T { return t.f }")
+		// t.Logf("fake output:\n%s", output)
+		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return GRLfvar_T2_F(t, b) }")
+		assert.Contains(t, output, "var GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T_thisIsInternal { return t.f }")
 
-		// Needs something that tests the reload phase and shows something like
-		// assert.Contains(t, ???, "GRLfvar_T2_F = func(t *T2, b atomic.Bool) GRLt_internal_t { /* some new code */ return t.f }")
+		// Change T2.F and reload
+		//
+		// This duplicates a subsection of reloader.Start and should probably be
+		// refactored.
+		newR := NewRewriter()
+		newR.Config.Overlay = map[string][]byte{
+			path + "/t1.go": []byte(`package fake
+import (
+	"github.com/got-reload/got-reload/pkg/fake/internal"
+	"sync/atomic"
+)
+
+type T2 struct {
+	f internal.T_thisIsInternal
+}
+
+func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
+`),
+			path + "/t2.go": []byte("package fake"),
+		}
+		newR.Load("../fake")
+
+		err := newR.Rewrite(ModeRewrite)
+		require.NoError(t, err)
+		err = newR.Rewrite(ModeReload)
+		require.NoError(t, err)
+		assert.Contains(t, newR.NewFunc[newR.Pkgs[0].PkgPath], "GRLfvar_T2_F")
+		// t.Logf("newR.NewFunc: %#v", newR.NewFunc)
+
+		funcEquals(newR, "GRLfvar_T2_F", "func(t *T2, b atomic.Bool) GRLt_internal_T_thisIsInternal { return t.f + 1 }")
+
+		// TODO: There could of course be multiple types with the same basename
+		// in *different* internal packages, sigh.
 	}
 
 	if false {

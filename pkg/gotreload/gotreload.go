@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/got-reload/got-reload/pkg/extract"
+	"github.com/got-reload/got-reload/pkg/util"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 )
@@ -123,6 +124,8 @@ func (r *Rewriter) Rewrite(mode RewriteMode) error {
 			err = r.rewritePkg(pkg)
 		case ModeReload:
 			err = r.reloadPkg(pkg)
+		default:
+			panic(fmt.Sprintf("Internal error: unknown rewrite mode: %v", mode))
 		}
 		if err != nil {
 			return err
@@ -168,7 +171,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 		if ident.Name == "_" || obj == nil {
 			continue
 		}
-		// log.Printf("Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
+		// log.Printf("Rewrite: Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
 		if typeName, ok := obj.(*types.TypeName); ok {
 			if named, ok := typeName.Type().(*types.Named); ok {
 				publicTypeName := typeName.Name()
@@ -270,6 +273,19 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 		}
 		definedInThisPackage[obj] = true
 	}
+	for ident, obj := range pkg.TypesInfo.Uses {
+		switch obj := obj.(type) {
+		case *types.TypeName:
+			if pkg := obj.Pkg(); pkg != nil && util.InternalPkg(pkg.Path()) {
+				// FIXME: Does not take into account types with the same name in
+				// different internal packages.
+
+				public := utypePrefix + "internal_" + ident.Name
+				r.needsPublicType[ident.Name] = public
+				// log.Printf("rewrite: Use of: %#v, Obj: %#v, external name: %s", ident, obj, public)
+			}
+		}
+	}
 
 	r.stubTopLevelFuncs(pkg, r.funcs, ModeRewrite)
 
@@ -321,6 +337,9 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 	}
 	// log.Printf("Pkg: %#v", pkg)
 
+	// for ident, obj := range pkg.TypesInfo.Uses {
+	// 	log.Printf("reload: Use of: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
+	// }
 	for _, file := range pkg.Syntax {
 		// b := &bytes.Buffer{}
 		// err := format.Node(b, pkg.Fset, file)
@@ -329,8 +348,14 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 		// }
 		// log.Printf("reload: before\n%s", b.String())
 
+		var preErr error
 		replace := map[ast.Node]ast.Node{}
 		pre := func(c *astutil.Cursor) bool {
+			if preErr != nil {
+				return false
+			}
+
+			// log.Printf("reload: I see: Obj: %#v", c.Node())
 			switch n := c.Node().(type) {
 			case *ast.Ident:
 				if _, ok := r.needsAccessor[n.Name]; ok {
@@ -401,13 +426,17 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 													},
 												}}}
 								} else {
-									log.Printf("%s: s not found for %s; underlying: %#v", pos, n.Name, named.Underlying())
+									preErr = fmt.Errorf("%s: s not found for %s; underlying: %#v", pos, n.Name, named.Underlying())
+									return false
 								}
 							} else {
-								log.Printf("%s: types.Named not found for %s", pos, n.Name)
+								// I don't think this is an error, actually
+								// preErr = fmt.Errorf("%s: types.Named not found for %s; found %#v", pos, n.Name, pkg.TypesInfo.Uses[selIdent].Type())
+								// return false
 							}
 						} else {
-							log.Printf("%s: SelectorExpr not found for %s", pos, n.Name)
+							preErr = fmt.Errorf("%s: SelectorExpr not found for %s", pos, n.Name)
+							return false
 						}
 					}
 				}
@@ -416,6 +445,9 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 					case *ast.ValueSpec:
 						// log.Printf("Setting public type: %s to %s.%s", n.Name, pkg.Name, publicType)
 						c.Replace(&ast.Ident{Name: publicType})
+					case *ast.SelectorExpr:
+						// log.Printf("reload: publictype: I see: Obj: %#v, parent: %#v", c.Node(), c.Parent())
+						replace[c.Parent()] = &ast.Ident{Name: publicType}
 					}
 				}
 			}
@@ -424,10 +456,18 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 		post := func(c *astutil.Cursor) bool {
 			if r, ok := replace[c.Node()]; ok {
 				c.Replace(r)
+				delete(replace, c.Node())
 			}
 			return true
 		}
 		file = astutil.Apply(file, pre, post).(*ast.File)
+		if len(replace) > 0 {
+			panic(fmt.Sprintf("Internal error: replace map should be used up & empty, but it has %d values in it: %v",
+				len(replace), replace))
+		}
+		if preErr != nil {
+			return preErr
+		}
 
 		// b = &bytes.Buffer{}
 		// err = format.Node(b, pkg.Fset, file)

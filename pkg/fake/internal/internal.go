@@ -1,5 +1,3 @@
 package internal
 
-var V int
-
-type T int
+type T_thisIsInternal int
