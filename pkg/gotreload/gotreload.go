@@ -26,6 +26,7 @@ const (
 
 	// Used to generate argument names.
 	syntheticArgPrefix = "GRLarg_"
+	syntheticReceiver  = "GRLrecvr"
 	// Used for stub function variable names.
 	stubPrefix = "GRLfvar_"
 	// Used for set functions.
@@ -661,7 +662,6 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 
 	var newArgs []ast.Expr
 
-	n := 0
 	recvrVarOffset := 0
 
 	// Process the receiver for a method definition
@@ -670,17 +670,16 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 		recvrVarOffset++
 
 		var receiverName string
-		if len(node.Recv.List[0].Names) == 0 {
-			// If the function has no receiver name, we have to generate one.
-			receiverName = fmt.Sprintf("%s%d", syntheticArgPrefix, n)
-			n++
+		if len(node.Recv.List[0].Names) == 0 || node.Recv.List[0].Names[0].Name == "_" {
+			// If the function has no receiver name, or it's "_", we have to generate one.
+			receiverName = syntheticReceiver
 			node.Recv.List[0].Names = []*ast.Ident{{Name: receiverName}}
 		} else {
 			receiverName = node.Recv.List[0].Names[0].Name
 		}
 
 		// Add receiver name to the front of the function call arglist
-		newArgs = append(newArgs, newIdent(receiverName))
+		newArgs = append(newArgs, &ast.Ident{Name: receiverName})
 
 		// prepend the receiver & type to the new function type
 		newVarType.Params.List = append(
@@ -709,12 +708,14 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 		}
 	}
 
-	// Copy all formal arguments into the arglist of the function call
+	// Copy all formal arguments into the arglist of the function call,
+	// replacing missing args and "_" args with synthetic arg names.
+	argN := 0
 	for i, argField := range node.Type.Params.List {
 		if len(argField.Names) == 0 {
-			newName := fmt.Sprintf("%s%d", syntheticArgPrefix, n)
-			n++
-			ident := newIdent(newName)
+			newName := fmt.Sprintf("%s%d", syntheticArgPrefix, argN)
+			argN++
+			ident := &ast.Ident{Name: newName}
 			argField.Names = []*ast.Ident{ident}
 			newArgs = append(newArgs, ident)
 
@@ -722,7 +723,13 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 			newVarType.Params.List[recvrVarOffset+i].Names = argField.Names
 		} else {
 			for _, argName := range argField.Names {
-				newArgs = append(newArgs, newIdent(argName.Name))
+				if argName.Name == "_" {
+					// Update the argname in place
+					argName.Name = fmt.Sprintf("%s%d", syntheticArgPrefix, argN)
+					// log.Printf("set argName to %s", argNameIdent.Name)
+				}
+				newArgs = append(newArgs, &ast.Ident{Name: argName.Name})
+				argN++
 			}
 		}
 	}
@@ -731,7 +738,7 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 	name = stubPrefix + name
 	// Define the new body of the function/method to just call the stub.
 	stubCall := &ast.CallExpr{
-		Fun:      newIdent(name),
+		Fun:      &ast.Ident{Name: name},
 		Args:     newArgs,
 		Ellipsis: ellipsisPos,
 	}
@@ -758,8 +765,9 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 		Body: node.Body,
 	}
 
-	// Define the stub with the new arglist, and old body from the
-	// function/method.
+	// Define the var stub with the new arglist
+	//
+	// var <name> <func-type>
 	newVar := &ast.GenDecl{
 		Tok: token.VAR,
 		Specs: []ast.Spec{
@@ -768,33 +776,29 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl
 				Type:  newVarType,
 			}}}
 
+	// Assign the old body from the function/method to the stub var in an init
+	// function.
+	//
+	// func init() { <name> = <function-literal> }
 	newInit := &ast.FuncDecl{
 		Name: &ast.Ident{Name: "init"},
 		Type: &ast.FuncType{Params: &ast.FieldList{}},
 		Body: &ast.BlockStmt{
 			List: []ast.Stmt{
 				&ast.AssignStmt{
-					Lhs: []ast.Expr{
-						&ast.Ident{Name: name}},
+					Lhs: []ast.Expr{&ast.Ident{Name: name}},
 					Tok: token.ASSIGN,
-					Rhs: []ast.Expr{
-						funcLit}}}}}
+					Rhs: []ast.Expr{funcLit}}}}}
 
 	// Replace the node's body with the new body in-place.
+	//
+	// func <real-name><signature> { <real-body> }
+	//
+	// =>
+	//
+	// func <real-name><signature> { <call-stub-var> }
 	node.Body = body
 	return name, newVar, newInit, funcLit
-}
-
-func newSelector(x, sel string) *ast.SelectorExpr {
-	return &ast.SelectorExpr{X: newIdent(x), Sel: newIdent(sel)}
-}
-
-func newIdent(name string) *ast.Ident {
-	return &ast.Ident{Name: name}
-}
-
-func newStringLit(s string) *ast.BasicLit {
-	return &ast.BasicLit{Kind: token.STRING, Value: fmt.Sprintf("%q", s)}
 }
 
 func copyFuncType(t *ast.FuncType) *ast.FuncType {
