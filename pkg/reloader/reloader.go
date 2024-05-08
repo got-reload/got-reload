@@ -124,7 +124,7 @@ func StartWatching(list []string) (<-chan string, *gotreload.Rewriter) {
 	}
 
 	log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
-	out := make(chan string)
+	changesCh := make(chan string)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, nil
@@ -137,21 +137,23 @@ func StartWatching(list []string) (<-chan string, *gotreload.Rewriter) {
 		}
 	}
 	go func() {
-		defer close(out)
+		defer close(changesCh)
 		for event := range watcher.Events {
 			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) > 0 {
 				abs, _ := filepath.Abs(event.Name)
 				rMux.Lock()
 				if _, _, err := r.LookupFile(abs); err == nil {
-					out <- abs
+					changesCh <- abs
 				} else {
 					// log.Printf("An unknown file changed: %s", abs)
 				}
 				rMux.Unlock()
+			} else {
+				log.Printf("Unknown event: %v", event)
 			}
 		}
 	}()
-	return out, r
+	return changesCh, r
 }
 
 func Start() {
@@ -223,9 +225,9 @@ func Start() {
 					pkgPath := newR.Pkgs[0].PkgPath
 					stubVars := newR.NewFunc[newR.Pkgs[0].PkgPath]
 
-					log.Printf("Looking for setters in %s", pkgPath)
+					log.Printf("Looking for updated functions in %s", pkgPath)
 					for stubVar := range stubVars {
-						log.Printf("Looking at %s", stubVar)
+						// log.Printf("Looking at %s", stubVar)
 
 						// Get a string version of the old function definition
 						origDef, err := r.FuncDef(pkgPath, stubVar)

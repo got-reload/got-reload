@@ -95,7 +95,7 @@ func init() {
 	}
 	{{range $m := $value.Method -}}
 		func (W {{$value.Name}}) {{$m.Name}}{{$m.Param}} {{$m.Result}} {
-			{{- if eq $m.Name "String" }}
+			{{- if and (eq $m.Name "String") (eq $m.Result "string") }}
 			if W.WString == nil {
 				return ""
 			}

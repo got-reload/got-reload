@@ -168,6 +168,7 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
 	r.needsPublicType = map[string]string{}
 	imports := extract.NewImportTracker(pkg.Name, pkg.PkgPath)
+
 DEFS:
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
@@ -294,6 +295,7 @@ DEFS:
 				if index := strings.Index(typeName, "."); index == -1 ||
 					len(typeName) > index && token.IsExported(typeName[index+1:]) {
 
+					// log.Printf("needsAccessor: %p %#v, defs: %#v", ident, ident, pkg.TypesInfo.Defs[ident])
 					r.needsAccessor[ident.Name] = typeName
 				}
 			case *types.TypeName:
@@ -394,18 +396,47 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 			// log.Printf("reload: I see: Obj: %#v", c.Node())
 			switch n := c.Node().(type) {
 			case *ast.Ident:
-				if _, ok := r.needsAccessor[n.Name]; ok {
+				_, needsAccessor := r.needsAccessor[n.Name]
+				uses, hasUses := pkg.TypesInfo.Uses[n]
+				if needsAccessor && hasUses && (uses.Parent() == nil || uses.Parent() == pkg.Types.Scope()) {
+					// log.Printf("needsAccessor during reload: %p %#v Uses: %#v, Defs: %#v", n, n, pkg.TypesInfo.Uses[n], pkg.TypesInfo.Defs[n])
 					switch parent := c.Parent().(type) {
+					// things that implement ast.Expr:
+					// BadExpr        // can probably skip
+					// Ident          // can probably skip -- seems redundant, sort of?
+					// Ellipsis       // can probably skip
+					// BasicLit       // can probably skip
+					// FuncLit        // can probably skip
+					// CompositeLit
+					// ParenExpr      // can probably skip
+					// SelectorExpr   // done
+					// IndexExpr      // done
+					// IndexListExpr
+					// SliceExpr
+					// TypeAssertExpr
+					// CallExpr       // done
+					// StarExpr       // done
+					// UnaryExpr      // done
+					// BinaryExpr     // done
+					// KeyValueExpr
+					// ArrayType
+					// StructType
+					// FuncType
+					// InterfaceType
+					// MapType
+					// ChanType
+
 					case *ast.ValueSpec:
-					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.StarExpr:
+					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.StarExpr,
+						*ast.IndexExpr, *ast.SendStmt, *ast.RangeStmt, *ast.ReturnStmt,
+						*ast.IncDecStmt:
+
 						// Transform <var1> into *funcUAddrPrefix+<var1> in
 						// assignments, expressions, and function call arguments.
 						c.Replace(
 							&ast.StarExpr{
 								X: &ast.CallExpr{
-									Fun: &ast.Ident{
-										Name: funcUAddrPrefix + n.Name,
-									},
+									Fun: &ast.Ident{Name: funcUAddrPrefix + n.Name},
 								},
 							})
 
@@ -414,22 +445,16 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 						// deref the pointer returned by the function.
 						replace[parent] =
 							&ast.CallExpr{
-								Fun: &ast.Ident{
-									Name: funcUAddrPrefix + n.Name,
-								},
+								Fun: &ast.Ident{Name: funcUAddrPrefix + n.Name},
 							}
 
 					case *ast.SelectorExpr:
 						replace[parent] =
 							&ast.SelectorExpr{
 								X: &ast.CallExpr{
-									Fun: &ast.Ident{
-										Name: funcUAddrPrefix + n.Name,
-									},
+									Fun: &ast.Ident{Name: funcUAddrPrefix + n.Name},
 								},
-								Sel: &ast.Ident{
-									Name: parent.Sel.Name,
-								},
+								Sel: &ast.Ident{Name: parent.Sel.Name},
 							}
 
 					case *ast.Field:
@@ -439,40 +464,40 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 						buf := bytes.Buffer{}
 						ast.Fprint(&buf, pkg.Fset, parent, ast.NotNilFilter)
 						log.Printf("path %s:\n%s", n.Name, buf.String())
-						panic(fmt.Sprintf("Unknown node type in expression involving %s", n.Name))
+						// panic(fmt.Sprintf("Unknown node type in expression involving %s", n.Name))
 					}
 				}
 				if _, ok := r.needsFieldAccessor[n.Name]; ok {
 					pos := pkg.Fset.Position(n.Pos())
+					_ = pos
 					// log.Printf("%s: needsFieldAccessor? %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, par, pkg.TypesInfo.Uses[n])
 					if se, ok := c.Parent().(*ast.SelectorExpr); ok {
 						if selIdent, ok := se.X.(*ast.Ident); ok {
-							if named, ok := pkg.TypesInfo.Uses[selIdent].Type().(*types.Named); ok {
-								if s, ok := named.Underlying().(*types.Struct); ok {
-									// log.Printf("%s: setting replacement: %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, c.Parent(), pkg.TypesInfo.Uses[n])
-									replace[c.Parent()] =
-										&ast.StarExpr{
-											X: &ast.CallExpr{
-												Fun: &ast.SelectorExpr{
-													X: &ast.Ident{
-														Name: selIdent.Name,
-													},
-													Sel: &ast.Ident{
-														Name: r.needsFieldAccessor[n.Name][s].AddrName,
-													},
-												}}}
+							if obj, ok := pkg.TypesInfo.Uses[selIdent]; ok {
+								if named, ok := obj.Type().(*types.Named); ok {
+									if s, ok := named.Underlying().(*types.Struct); ok {
+										// log.Printf("%s: setting replacement: %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, c.Parent(), pkg.TypesInfo.Uses[n])
+										replace[c.Parent()] =
+											&ast.StarExpr{
+												X: &ast.CallExpr{
+													Fun: &ast.SelectorExpr{
+														X:   &ast.Ident{Name: selIdent.Name},
+														Sel: &ast.Ident{Name: r.needsFieldAccessor[n.Name][s].AddrName},
+													}}}
+									} else {
+										// preErr = fmt.Errorf("%s: struct type not found for %s; underlying: %#v", pos, n.Name, named.Underlying())
+										// return false
+									}
 								} else {
-									preErr = fmt.Errorf("%s: s not found for %s; underlying: %#v", pos, n.Name, named.Underlying())
-									return false
+									// I don't think this is an error, actually
+									// preErr = fmt.Errorf("%s: types.Named not found for %s; found %#v", pos, n.Name, pkg.TypesInfo.Uses[selIdent].Type())
+									// return false
 								}
 							} else {
-								// I don't think this is an error, actually
-								// preErr = fmt.Errorf("%s: types.Named not found for %s; found %#v", pos, n.Name, pkg.TypesInfo.Uses[selIdent].Type())
-								// return false
 							}
 						} else {
-							preErr = fmt.Errorf("%s: SelectorExpr not found for %s", pos, n.Name)
-							return false
+							// preErr = fmt.Errorf("%s: SelectorExpr not found for %s", pos, n.Name)
+							// return false
 						}
 					}
 				}

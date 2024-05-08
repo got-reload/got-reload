@@ -434,7 +434,7 @@ func TestCompileParse(t *testing.T) {
 
 	rewrite := func(src string) (*Rewriter, *packages.Package, string, map[string]ast.Expr, string) {
 		t.Helper()
-		// log.Printf("rewrite: package fake; %s", src)
+		// t.Logf("rewrite: package fake; %s", src)
 		r := NewRewriter()
 
 		// r.Config.Logf = t.Logf
@@ -472,6 +472,7 @@ func TestCompileParse(t *testing.T) {
 		err = format.Node(b, pkg.Fset, file)
 		require.NoError(t, err)
 		output := b.String()
+		// t.Logf("output:\n%s", output)
 
 		return r, pkg, output, types, registrations
 	}
@@ -485,6 +486,7 @@ func TestCompileParse(t *testing.T) {
 
 	{
 		r, _, _, types, registrations := rewriteTrim("type t1 int")
+		// t.Logf("output:\n%s", output)
 
 		// Types, variables, functions, and function bodies should translate correctly
 		assert.Contains(t, types, "t1")
@@ -500,8 +502,8 @@ func TestCompileParse(t *testing.T) {
 		assert.Contains(t, output, `func init() { GRLfvar_f = func(a int) int { return a } }`)
 		assert.Contains(t, r.stubVars, "GRLfvar_f")
 		assert.Contains(t, registrations, `"GRLfvar_f": reflect.ValueOf(&GRLfvar_f).Elem()`)
-		// log.Printf("registrations:\n%s", registrations)
-		// log.Printf("output:\n%s", output)
+		// t.Logf("registrations:\n%s", registrations)
+		// t.Logf("output:\n%s", output)
 	}
 
 	{
@@ -509,11 +511,11 @@ func TestCompileParse(t *testing.T) {
 		assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
 	}
 
-	funcEquals := func(r *Rewriter, stubVar, funcValue string) {
+	funcEquals := func(r *Rewriter, stubVar, expectedFuncValue string) {
 		t.Helper()
 		pkg := r.Pkgs[0]
 		output := formatNode(t, pkg.Fset, r.NewFunc[pkg.PkgPath][stubVar])
-		assert.Equal(t, funcValue, output)
+		assert.Equal(t, expectedFuncValue, output)
 	}
 
 	{
@@ -624,7 +626,7 @@ func F9(_ int, b float32, _ string) float32 { return b }
 		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f8() **[]*context.Context { return &r.f8 }")
 		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f9() *atomic.Bool { return &r.f9 }")
 		assert.Contains(t, registrations, `"sync/atomic"`)
-		// log.Printf("registrations: %s", registrations)
+		// t.Logf("registrations: %s", registrations)
 
 		err := r.Rewrite(ModeReload)
 		require.NoError(t, err)
@@ -637,7 +639,7 @@ func F9(_ int, b float32, _ string) float32 { return b }
 		funcEquals(r, "GRLfvar_F6", "func() { **GRLuaddr_v7() += 0.1 }")
 		funcEquals(r, "GRLfvar_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
 		funcEquals(r, "GRLfvar_F8", "func(a int, b float32) (int, float32) { return a, b }")
-		// log.Printf("output: %s", output)
+		// t.Logf("output: %s", output)
 		assert.Contains(t, output, "func F9(GRLarg_0 int, b float32, GRLarg_2 string) float32 { return GRLfvar_F9(GRLarg_0, b, GRLarg_2) }")
 		// We don't actually need synthetic arg names (GRLarg_) in the function
 		// type, or the initial function literal.
@@ -774,6 +776,68 @@ type foo_baz struct { foo int; baz float32 }
 		_, _, _, _, registrations := rewriteTrim(`import "time"; type myTime time.Time`)
 		// t.Logf("fake registrations:\n%s", registrations)
 		assert.NotContains(t, registrations, "func (r *myTime)")
+	}
+
+	{
+		r, _, output, _, registrations := rewriteTrim(`
+type S struct {
+	key int
+}
+
+var m = map[int]int{}
+
+func f(s S) int {
+	return m[s.key]
+}
+
+var ch = make(chan int)
+
+func f2() {
+	ch <- 5
+}
+
+func f3() {
+	for k, v := range m {
+		_, _ = k, v
+	}
+}
+
+var v int
+
+func f4() int {
+	v++
+	return v
+}
+
+func f5(i int) S {
+	return S{
+		key: i,
+	}
+}
+
+`)
+		_, _ = output, registrations
+		// t.Logf("fake registrations:\n%s", registrations)
+		// t.Logf("fake output:\n%s", output)
+
+		newR := NewRewriter()
+		newR.Config = r.Config
+		newR.Load("../fake")
+
+		err := newR.Rewrite(ModeRewrite)
+		require.NoError(t, err)
+		err = newR.Rewrite(ModeReload)
+		require.NoError(t, err)
+
+		// t.Logf("reloaded output:\n%s", formatNode(t, newR.Pkgs[0].Fset, newR.Pkgs[0].Syntax[0]))
+
+		funcEquals(newR, "GRLfvar_f", "func(s S) int { return (*GRLuaddr_m())[*s.GRLmaddr_S_key()] }")
+		funcEquals(newR, "GRLfvar_f2", "func() { *GRLuaddr_ch() <- 5 }")
+		funcEquals(newR, "GRLfvar_f3", "func() { for k, v := range *GRLuaddr_m() { _, _ = k, v } }")
+		funcEquals(newR, "GRLfvar_f4", "func() int { *GRLuaddr_v()++ return *GRLuaddr_v() }")
+		funcEquals(newR, "GRLfvar_f5", "func(i int) S { return S{ key: i, } }")
+
+		// t.Logf("newR.NewFunc: %#v", newR.NewFunc)
 	}
 
 	if false {

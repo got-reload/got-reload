@@ -112,7 +112,7 @@ func run(selfName string, args []string) {
 	set.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
 
-%[1]s [flags] <package> [<package> ...]
+%[1]s [flags] <package> <cmd-args>
 
 Flags:
 
@@ -195,7 +195,9 @@ Flags:
 	// if err := runWithIOIn(workDir, "go", "mod", "tidy"); err != nil {
 	// 	log.Fatalf("Failed running go mod tidy: %v", err)
 	// }
-	if err := runWithIOIn(workDir, "go", "run", "-v", string(mainPath)); err != nil {
+	runArgs := append([]string{"run", "-v", string(mainPath)}, set.Args()[1:]...)
+	// if err := runWithIOIn(workDir, "go", "run", "-v", string(mainPath)); err != nil {
+	if err := runWithIOIn(workDir, "go", runArgs...); err != nil {
 		log.Fatalf("Failed running go run: %v", err)
 	}
 }
@@ -272,6 +274,7 @@ func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName strin
 	return writeTempFile(b.Bytes(), targetFileName)
 }
 
+// Not currently used
 func writeTempFile(source []byte, targetFileName string) (string, error) {
 	outputFile, err := os.CreateTemp("", "gotreloadable-*-"+filepath.Base(targetFileName))
 	if err != nil {
