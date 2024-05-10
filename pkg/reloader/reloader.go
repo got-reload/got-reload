@@ -42,13 +42,28 @@ var (
 	// PkgsToDirs and DirsToPkgs provide convenient lookups between local
 	// disk directories and go package names.
 	PkgsToDirs, DirsToPkgs = watchDirs()
+
+	RegisteredSymbols = interp.Exports{}
+	mux               sync.Mutex
+	registerRead      bool
+
+	registerAllWG sync.WaitGroup
 )
 
-var RegisteredSymbols = interp.Exports{}
+// This returns a value so that it can be used in a blank var expression, e.g.
+//
+//	var _ = Add()
+//
+// This is used to make sure all the RegisterAll functions have run.
+func Add() int {
+	// log.Printf("reloader.Add()")
+	registerAllWG.Add(1)
+	return 0
+}
 
-// Register records the mappings of exported symbol names to their values
+// register records the mappings of exported symbol names to their values
 // within the compiled executable.
-func Register(pkgName, ident string, val reflect.Value) {
+func register(pkgName, ident string, val reflect.Value) {
 	// log.Printf("Register %s.%s", pkgName, ident)
 	// baseName := path.Base(pkgName)
 	// log.Printf("Register %s.%s as package %s", pkgName, ident, baseName)
@@ -62,13 +77,22 @@ func Register(pkgName, ident string, val reflect.Value) {
 // RegisterAll invokes Register once for each symbol provided in the symbols
 // map.
 func RegisterAll(symbols interp.Exports) {
+	mux.Lock()
+	defer mux.Unlock()
+
 	// log.Printf("RegisterAll called on %d packages", len(symbols))
 	for pkg, pkgSyms := range symbols {
 		// log.Printf("RegisterAll: %s", pkg)
 		for pkgSym, value := range pkgSyms {
-			Register(pkg, pkgSym, value)
+			register(pkg, pkgSym, value)
 		}
 	}
+
+	if registerRead {
+		log.Printf("WARNING: RegisterAll called after Yaegi interpreter initialized")
+	}
+
+	registerAllWG.Done()
 }
 
 func watchPackages() []string {
@@ -107,7 +131,7 @@ var rMux sync.Mutex
 
 // StartWatching returns a channel and a new gotreload.Rewriter. The channel
 // emits a series of filenames (absolute paths) that've changed.
-func StartWatching(list []string) (<-chan string, *gotreload.Rewriter) {
+func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewriter, error) {
 	r := gotreload.NewRewriter()
 	r.Config.Dir = os.Getenv(SourceDirEnv)
 	err := r.Load(list...)
@@ -124,54 +148,87 @@ func StartWatching(list []string) (<-chan string, *gotreload.Rewriter) {
 	}
 
 	log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
-	changesCh := make(chan string)
+	changesCh := make(chan string, 1)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil, err
 	}
 	for dir := range DirsToPkgs {
 		log.Printf("Watching %s", dir)
 		err := watcher.Add(dir)
 		if err != nil {
-			return nil, nil
+			return nil, nil, nil, err
 		}
 	}
+	exitCh := make(chan struct{})
 	go func() {
 		defer close(changesCh)
-		for event := range watcher.Events {
-			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) > 0 {
-				abs, _ := filepath.Abs(event.Name)
-				rMux.Lock()
-				if _, _, err := r.LookupFile(abs); err == nil {
-					changesCh <- abs
+		defer watcher.Close()
+		for {
+			select {
+			case event := <-watcher.Events:
+				if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) > 0 {
+					abs, _ := filepath.Abs(event.Name)
+					rMux.Lock()
+					if _, _, err := r.LookupFile(abs); err == nil {
+						changesCh <- abs
+					} else {
+						// log.Printf("An unknown file changed: %s", abs)
+					}
+					rMux.Unlock()
 				} else {
-					// log.Printf("An unknown file changed: %s", abs)
+					// log.Printf("Unknown event: %v", event)
 				}
-				rMux.Unlock()
-			} else {
-				log.Printf("Unknown event: %v", event)
+			case <-exitCh:
+				return
 			}
 		}
 	}()
-	return changesCh, r
+	return changesCh, exitCh, r, nil
 }
 
 func Start() {
 	log.Println("Starting reloader")
-	changesCh, r := StartWatching(WatchedPkgs)
+	changesCh, exitCh, r, err := StartWatching(WatchedPkgs)
+	if err != nil {
+		log.Printf("Error starting watcher; reloading will not work: %v", err)
+		return
+	}
+
 	const dur = 100 * time.Millisecond
 	go func() {
-		// time.Sleep(5 * time.Second) // give the other init() functions time to register all the symbols
+		// Give the rest of the initialization proceses a moment to roll along
+		// and, one hopes, do so Adds on registerAllWG.
+		time.Sleep(time.Second)
+
+		// signal the watcher to shutdown if we exit
+		defer close(exitCh)
+
+		// Wait until all RegisterAlls have finished to continue
+		registerAllWG.Wait()
+		mux.Lock()
+		registerRead = true
+		mux.Unlock()
+		log.Println("Reloader continuing")
+
 		// log.Printf("Registered symbols: %v", RegisteredSymbols)
 
 		var timer *time.Timer
-		mux := sync.Mutex{}
 		changes := map[string]bool{}
 
+		i, err := getInterp()
+
+		if err != nil {
+			log.Printf("Error creating an interpreter, reloading will not work: %v", err)
+			return
+		}
+
 		for change := range changesCh {
-			log.Printf("Changed: %s", change)
 			mux.Lock()
-			changes[change] = true
+			if !changes[change] {
+				log.Printf("Changed: %s", change)
+				changes[change] = true
+			}
 
 			// The AfterFunc is sort of a poor-man's "debounce" function. We
 			// accumulate changed files into "changes" and call the "afterfunc"
@@ -182,9 +239,10 @@ func Start() {
 			timer = time.AfterFunc(dur, func() {
 				mux.Lock()
 				timer = nil
+				defer mux.Unlock()
 
 				for updated := range changes {
-					log.Printf("Reparsing due to %s", updated)
+					log.Printf("Reparsing package containing %s", updated)
 					newR := gotreload.NewRewriter()
 					newR.Config.Dir = os.Getenv(SourceDirEnv)
 
@@ -226,84 +284,86 @@ func Start() {
 					stubVars := newR.NewFunc[newR.Pkgs[0].PkgPath]
 
 					log.Printf("Looking for updated functions in %s", pkgPath)
+					// TODO: This works by formatting every function in the
+					// package. That's really slow. It'd be nice to at least only
+					// look at the functions in the files that changed. It'd also
+					// be nice to compare the data structures directly, instead of
+					// formatting it and then comparing the strings.
 					for stubVar := range stubVars {
-						// log.Printf("Looking at %s", stubVar)
+						// log.Printf("Looking at %s: %s", pkgPath, stubVar)
 
 						// Get a string version of the old function definition
-						origDef, err := r.FuncDef(pkgPath, stubVar)
+						origDefStr, err := r.FuncDef(pkgPath, stubVar)
 						if err != nil {
 							log.Printf("Error getting function definition of %s:%s: %v",
 								pkgPath, stubVar, err)
 							continue
 						}
 						// Get a string version of the new function definition
-						newDef, err := newR.FuncDef(pkgPath, stubVar)
+						newDefStr, err := newR.FuncDef(pkgPath, stubVar)
 						if err != nil {
-							log.Printf("Error getting function definition of %s:%s: %v",
+							log.Printf("Error getting new function definition of %s:%s: %v",
 								pkgPath, stubVar, err)
 							continue
 						}
 
-						if origDef == newDef {
-							// If they're the same, don't do anything
-							// log.Printf("Skip %s", stubVar)
+						if origDefStr == newDefStr {
 							continue
 						}
-						log.Printf("%s is new", stubVar)
+
+						log.Printf("%s is new (%s)", stubVar, strings.Split(newDefStr, "\n")[0])
 						// log.Printf("Call %s: %s", stubVar, newDef)
 
-						// FIXME: Try using the same interpreter the whole time
-						i := interp.New(interp.Options{
-							GoPath: os.Getenv("GOPATH"),
-						})
-						err = i.Use(stdlib.Symbols)
-						if err != nil {
-							log.Printf("Error Using stdlib.Symbols")
-							break
-						}
+						// newDefStr, _ := newR.FuncDef(pkgPath, stubVar)
+						setStub := fmt.Sprintf(`%s = %s`, stubVar, newDefStr)
 
-						err = i.Use(unsafe.Symbols)
-						if err != nil {
-							log.Printf("Error Using unsafe.Symbols")
-							break
-						}
-
-						err = i.Use(unrestricted.Symbols)
-						if err != nil {
-							log.Printf("Error Using unrestricted.Symbols")
-							break
-						}
-						// i.Use(interp.Symbols)
-						// log.Printf("Registered symbols: %v", RegisteredSymbols)
-						err = i.Use(RegisteredSymbols)
-						if err != nil {
-							log.Printf("Error Using RegisteredSymbols")
-							break
-						}
-
-						i.ImportUsed()
-
-						setStub := fmt.Sprintf(`%s = %s`, stubVar, newDef)
-
-						i.Eval(fmt.Sprintf(`
-package main
+						mainStub := fmt.Sprintf(`package main
 import . %q
 func main() {
 	%s
-}`, newR.Pkgs[0].PkgPath, setStub))
+}`, newR.Pkgs[0].PkgPath, setStub)
 
-						// log.Printf("Eval: %s", setStub)
-						_, err = i.Eval(setStub)
+						panicked := false
+						// Catch Yaegi panics
+						func() {
+							// defer func() {
+							// 	if r := recover(); r != nil {
+							// 		err = fmt.Errorf("Eval panicked: %v", r)
+							// 		panicked = true
+							// 	}
+							// }()
+							_, err = i.Eval(mainStub)
+						}()
+
+						if panicked {
+							log.Printf("ERROR: Interpreter panicked: %v", err)
+							i, err = getInterp()
+							if err != nil {
+								log.Printf("ERROR: Can't create a new interpreter, reloading will not work any more: %v", err)
+								rMux.Unlock()
+								return
+							}
+							continue
+						}
+
 						if err == nil {
 							log.Printf("Ran %s", stubVar)
 						} else {
-							log.Printf("Eval error: %v", err)
-							for i, line := range strings.Split(setStub, "\n") {
-								// i+1 because any error (of course) takes into
-								// account the "package" (etc) lines.
-								log.Printf("%d: %s", i+1, line)
+							errStr := err.Error()
+							log.Printf("Eval error: %s", errStr)
+							var line int
+							_, err := fmt.Sscanf(errStr, "%d:", &line)
+							if err == nil && line-1 >= 0 {
+								log.Printf("%d: %s", line, strings.Split(mainStub, "\n")[line-1])
+							} else {
+								// log.Printf("Cannot parse line number")
+								for i, line := range strings.Split(mainStub, "\n") {
+									// i+1 because any error (of course) takes into
+									// account the "package" (etc) lines.
+									log.Printf("%d: %s", i+1, line)
+								}
+								// log.Printf("Eval error (again): %v", err)
 							}
-							log.Printf("Eval error (again): %v", err)
 						}
 					}
 
@@ -321,10 +381,39 @@ func main() {
 
 					delete(changes, updated)
 				}
-
-				mux.Unlock()
 			})
 			mux.Unlock()
 		}
 	}()
+}
+
+func getInterp() (*interp.Interpreter, error) {
+	i := interp.New(interp.Options{
+		GoPath: os.Getenv("GOPATH"),
+	})
+	err := i.Use(stdlib.Symbols)
+	if err != nil {
+		return nil, fmt.Errorf("Error Using stdlib.Symbols")
+	}
+
+	err = i.Use(unsafe.Symbols)
+	if err != nil {
+		return nil, fmt.Errorf("Error Using unsafe.Symbols")
+	}
+
+	err = i.Use(unrestricted.Symbols)
+	if err != nil {
+		return nil, fmt.Errorf("Error Using unrestricted.Symbols")
+	}
+
+	// i.Use(interp.Symbols)
+	// log.Printf("Registered symbols: %v", RegisteredSymbols)
+	err = i.Use(RegisteredSymbols)
+	if err != nil {
+		return nil, fmt.Errorf("Error Using RegisteredSymbols")
+	}
+
+	i.ImportUsed()
+
+	return i, nil
 }

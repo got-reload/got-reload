@@ -41,6 +41,8 @@ import (
 	_ "github.com/got-reload/got-reload/pkg/reloader/start"
 )
 
+var _ = reloader.Add()
+
 func init() {
 	reloader.RegisterAll(map[string]map[string]reflect.Value{
     	"{{.ImportPath}}": {
@@ -54,12 +56,6 @@ func init() {
 			{{end -}}
 		{{end}}
 		{{- end -}}
-		{{- if .NeedsAccessor}}
-		// accessor functions for unexported variables
-		{{range $var, $ignored := .NeedsAccessor -}}
-			"GRLuaddr_{{$var}}": reflect.ValueOf(GRLuaddr_{{$var}}),
-		{{end}}
-		{{- end}}
 
 		{{- if .Typ}}
 		// type definitions
@@ -106,26 +102,10 @@ func init() {
 {{end}}
 {{end}}
 
-{{- if .NeedsAccessor }}
-// Accessor functions for unexported variables
-{{range $var, $type := .NeedsAccessor -}}
-func GRLuaddr_{{$var}}() *{{$type}} { return &{{$var}} }
-{{end}}
-{{end}}
-
 {{- if .NeedsPublicType }}
 // Type aliases
 {{range $unexportedName, $exportedName := .NeedsPublicType -}}
 type {{$exportedName}} = {{$unexportedName}}
-{{end}}
-{{end}}
-
-{{- if .NeedsFieldAccessor }}
-// Field accessors
-{{range $name, $s := .NeedsFieldAccessor -}}
-{{range $type, $thing := $s -}}
-func (r *{{$thing.RType}}) {{$thing.AddrName}}() *{{$thing.FieldType}} { return &r.{{$name}} }
-{{end}}
 {{end}}
 {{end}}
 `
@@ -185,9 +165,7 @@ func GenContent(
 	destPkg, importPath string,
 	p *types.Package,
 	setFuncs map[string]bool,
-	needsAccessor map[string]string,
 	needsPublicType map[string]string,
-	needsFieldAccessor map[string]map[*types.Struct]FieldAccessor, // field name -> rtype name -> stuff
 	imports *ImportTracker,
 ) ([]byte, error) {
 	prefix := "_" + importPath + "_"
@@ -205,14 +183,22 @@ func GenContent(
 NAME:
 	for _, name := range sc.Names() {
 		o := sc.Lookup(name)
-		if !o.Exported() {
-			continue
-		}
 
 		pkgPrefix := imports.GetAlias(o.Pkg().Name(), o.Pkg().Path())
 		if pkgPrefix != "" {
 			pkgPrefix += "."
 		}
+
+		if !o.Exported() {
+			if pkgPrefix == "" {
+				// It's in this package: export it
+				name = "GRLx_" + name
+			} else {
+				// It's not in this package: skip it
+				continue
+			}
+		}
+		// log.Printf("gencontent: %s, %#v", name, o)
 
 		pname := name
 		// LMC: Not sure what this is all about.  We don't import the package
@@ -256,8 +242,14 @@ NAME:
 			METHOD:
 				for i := 0; i < t.NumMethods(); i++ {
 					f := t.Method(i)
+					fName := f.Name()
 					if !f.Exported() {
-						continue
+						if pkgPrefix == "" {
+							// If it's in this package, export it.
+							fName = "GRLx_" + fName
+						} else {
+							continue
+						}
 					}
 
 					sign := f.Type().(*types.Signature)
@@ -276,9 +268,6 @@ NAME:
 							args[j] += "..."
 						} else {
 							if n, ok := v.Type().(*types.Named); ok {
-								// log.Printf("method arg %d type %T: %s, %s", j, v.Type(), types.TypeString(v.Type(), qualify),
-								// 	n.Obj().Pkg().Path())
-
 								// If a method type is "internal", skip the method,
 								// and don't import the type's package.
 								if pkg := n.Obj().Pkg(); pkg != nil && util.InternalPkg(pkg.Path()) {
@@ -289,13 +278,13 @@ NAME:
 									// whole interface, if we can't wrap every method
 									// in it.
 									log.Printf("WARNING: %s: Skipping method %s.%s; this may impact what interfaces this type implements",
-										n.Obj().Name(), typ[name], f.Name())
+										n.Obj().Name(), typ[name], fName)
 
+									// Not sure I need this, given that I essentially
+									// run "goimports" later.
 									imports.NoImport(pkg.Name(), pkg.Path())
 									continue METHOD
 								}
-							} else {
-								// log.Printf("method arg %d type %T: %s", j, v.Type(), types.TypeString(v.Type(), qualify))
 							}
 							params[j] = args[j] + " " + types.TypeString(v.Type(), qualify)
 						}
@@ -325,11 +314,9 @@ NAME:
 						ret = "return"
 					}
 
-					methods = append(methods, Method{f.Name(), param, result, arg, ret})
+					methods = append(methods, Method{fName, param, result, arg, ret})
 				}
 				wrap[name] = Wrap{prefix + name, methods}
-			} else {
-				// log.Printf("type %s: %s: Underlying: %T", name, typ[name], o.Type().Underlying())
 			}
 		}
 	}
@@ -340,9 +327,7 @@ NAME:
 		val[name] = Val{name, true}
 	}
 
-	if len(val) == 0 && len(typ) == 0 &&
-		len(needsAccessor) == 0 && len(needsPublicType) == 0 && len(needsFieldAccessor) == 0 {
-
+	if len(val) == 0 && len(typ) == 0 && len(needsPublicType) == 0 {
 		log.Printf("No vals or types or public types, etc: %s, %s", destPkg, importPath)
 		return nil, nil
 	}
@@ -384,16 +369,14 @@ NAME:
 	_, pkgName := path.Split(importPath)
 	b := new(bytes.Buffer)
 	data := map[string]interface{}{
-		"Dest":               destPkg,
-		"Imports":            imports.alias,
-		"ImportPath":         importPath + "/" + pkgName,
-		"Val":                val,
-		"Typ":                typ,
-		"Wrap":               wrap,
-		"BuildTags":          buildTags,
-		"NeedsAccessor":      needsAccessor,
-		"NeedsPublicType":    needsPublicType,
-		"NeedsFieldAccessor": needsFieldAccessor,
+		"Dest":            destPkg,
+		"Imports":         imports.alias,
+		"ImportPath":      importPath + "/" + pkgName,
+		"Val":             val,
+		"Typ":             typ,
+		"Wrap":            wrap,
+		"BuildTags":       buildTags,
+		"NeedsPublicType": needsPublicType,
 	}
 	err = parse.Execute(b, data)
 	if err != nil {

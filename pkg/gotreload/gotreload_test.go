@@ -432,7 +432,7 @@ func TestCompileParse(t *testing.T) {
 	path := path.Dir(cwd) + "/fake"
 	// t.Logf("Getwd: %s, %v", cwd, err)
 
-	rewrite := func(src string) (*Rewriter, *packages.Package, string, map[string]ast.Expr, string) {
+	rewrite := func(src string) (*Rewriter, *packages.Package, string, string) {
 		t.Helper()
 		// t.Logf("rewrite: package fake; %s", src)
 		r := NewRewriter()
@@ -462,7 +462,6 @@ func TestCompileParse(t *testing.T) {
 
 		require.NotZero(t, len(pkg.Syntax))
 		file := pkg.Syntax[0]
-		types := getTypes(file)
 		var registrations string
 		if r.Info[pkg] != nil && len(r.Info[pkg].Registrations) > 0 {
 			registrations = string(r.Info[pkg].Registrations)
@@ -474,41 +473,38 @@ func TestCompileParse(t *testing.T) {
 		output := b.String()
 		// t.Logf("output:\n%s", output)
 
-		return r, pkg, output, types, registrations
+		return r, pkg, output, registrations
 	}
 
-	rewriteTrim := func(src string) (*Rewriter, *packages.Package, string, map[string]ast.Expr, string) {
-		r, pkg, output, types, registrations := rewrite(src)
+	rewriteTrim := func(src string) (*Rewriter, *packages.Package, string, string) {
+		r, pkg, output, registrations := rewrite(src)
 		output = filterWhitespace(output)
 		registrations = filterWhitespace(registrations)
-		return r, pkg, output, types, registrations
+		return r, pkg, output, registrations
 	}
 
 	{
-		r, _, _, types, registrations := rewriteTrim("type t1 int")
+		_, _, output, _ := rewriteTrim("type t1 int")
 		// t.Logf("output:\n%s", output)
 
 		// Types, variables, functions, and function bodies should translate correctly
-		assert.Contains(t, types, "t1")
-		assert.Contains(t, r.needsPublicType, "t1")
-		assert.Equal(t, "GRLt_t1", r.needsPublicType["t1"])
-		assert.Contains(t, registrations, "type GRLt_t1 = t1")
+		assert.Contains(t, output, "type GRLx_t1 int")
 	}
 
 	{
-		r, _, output, _, registrations := rewriteTrim("func f(a int) int { return a }")
-		assert.Contains(t, output, `func f(a int) int { return GRLfvar_f(a) }`)
+		_, _, output, registrations := rewriteTrim("func f(a int) int { return a }")
+		assert.Contains(t, output, `func GRLx_f(a int) int { return GRLfvar_f(a) }`)
 		assert.Contains(t, output, `var GRLfvar_f func(a int) int`)
 		assert.Contains(t, output, `func init() { GRLfvar_f = func(a int) int { return a } }`)
-		assert.Contains(t, r.stubVars, "GRLfvar_f")
 		assert.Contains(t, registrations, `"GRLfvar_f": reflect.ValueOf(&GRLfvar_f).Elem()`)
 		// t.Logf("registrations:\n%s", registrations)
 		// t.Logf("output:\n%s", output)
 	}
 
 	{
-		_, _, _, _, registrations := rewriteTrim(`type t1 int; var v3 t1`)
-		assert.Contains(t, registrations, `func GRLuaddr_v3() *t1 { return &v3 }`)
+		_, _, output, registrations := rewriteTrim(`type t1 int; var v3 t1`)
+		assert.Contains(t, registrations, `"GRLx_v3": reflect.ValueOf(&GRLx_v3).Elem()`)
+		assert.Contains(t, output, `type GRLx_t1 int var GRLx_v3 GRLx_t1`)
 	}
 
 	funcEquals := func(r *Rewriter, stubVar, expectedFuncValue string) {
@@ -519,7 +515,7 @@ func TestCompileParse(t *testing.T) {
 	}
 
 	{
-		r, _, output, _, registrations := rewriteTrim(`
+		r, _, output, registrations := rewriteTrim(`
 import (
 	"fmt"
 	"sync"
@@ -596,47 +592,36 @@ func F8(a int, b float32) (int, float32) {
 
 func F9(_ int, b float32, _ string) float32 { return b }
 `)
-		assert.Contains(t, registrations, "func GRLuaddr_v3() *t1 { return &v3 }")
-		assert.Contains(t, registrations, "func GRLuaddr_v5() **float32 { return &v5 }")
-		assert.Contains(t, registrations, "func GRLuaddr_v6() *sync.Mutex { return &v6 }")
-		assert.Contains(t, registrations, "func GRLuaddr_v8() *[]int { return &v8 }")
-		assert.Contains(t, registrations, "func GRLuaddr_v9() *interface{} { return &v9 }")
+		assert.Contains(t, output, "var GRLx_v3 GRLx_t1")
+		assert.Contains(t, output, "var GRLx_v5 = new(float32)")
+		assert.Contains(t, output, "var GRLx_v6 sync.Mutex")
+		assert.Contains(t, output, "var GRLx_v8 = []int{}")
+		assert.Contains(t, output, "var GRLx_v9 = (interface{})(2)")
 
-		assert.Contains(t, registrations, `"GRLfvar_t2_T2_method1": reflect.ValueOf(&GRLfvar_t2_T2_method1).Elem(),`)
-		assert.Contains(t, output, "var GRLfvar_t2_T2_method1 func(r *t2) int")
-		assert.Contains(t, output, "func init() { GRLfvar_t2_T2_method1 = func(r *t2) int { return 0 } }")
+		assert.Contains(t, registrations, `"GRLfvar_GRLx_t2_T2_method1": reflect.ValueOf(&GRLfvar_GRLx_t2_T2_method1).Elem(),`)
+		assert.Contains(t, output, "var GRLfvar_GRLx_t2_T2_method1 func(r *GRLx_t2) int")
+		assert.Contains(t, output, "func init() { GRLfvar_GRLx_t2_T2_method1 = func(r *GRLx_t2) int { return 0 } }")
 
-		assert.Contains(t, output, "var GRLfvar_t2_T2_method2 func(GRLrecvr *t2) int")
-		assert.Contains(t, output, "func init() { GRLfvar_t2_T2_method2 = func(GRLrecvr *t2) int { return 1 } }")
+		assert.Contains(t, output, "var GRLfvar_GRLx_t2_T2_method2 func(GRLrecvr *GRLx_t2) int")
+		assert.Contains(t, output, "func init() { GRLfvar_GRLx_t2_T2_method2 = func(GRLrecvr *GRLx_t2) int { return 1 } }")
 
-		assert.Contains(t, output, "func (GRLrecvr *t2) T2_method3(GRLarg_0, GRLarg_1, GRLarg_2 int) int { return GRLfvar_t2_T2_method3(GRLrecvr, GRLarg_0, GRLarg_1, GRLarg_2) }")
-		assert.Contains(t, output, "var GRLfvar_t2_T2_method3 func(GRLrecvr *t2, _, _, _ int) int")
-		assert.Contains(t, output, "func init() { GRLfvar_t2_T2_method3 = func(GRLrecvr *t2, _, _, _ int) int { return 2 } }")
+		assert.Contains(t, output, "func (GRLrecvr *GRLx_t2) T2_method3(GRLarg_0, GRLarg_1, GRLarg_2 int) int { return GRLfvar_GRLx_t2_T2_method3(GRLrecvr, GRLarg_0, GRLarg_1, GRLarg_2) }")
+		assert.Contains(t, output, "var GRLfvar_GRLx_t2_T2_method3 func(GRLrecvr *GRLx_t2, _, _, _ int) int")
+		assert.Contains(t, output, "func init() { GRLfvar_GRLx_t2_T2_method3 = func(GRLrecvr *GRLx_t2, _, _, _ int) int { return 2 } }")
 
-		assert.Contains(t, registrations, `"sync"`)
 		assert.Contains(t, registrations, `"M": reflect.ValueOf((*M)(nil))`)
 		assert.Contains(t, registrations, `"ContextAlias": reflect.ValueOf((*ContextAlias)(nil))`)
-		assert.Contains(t, registrations, "func GRLuaddr_v8() *[]int { return &v8 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_t1() **t1 { return &r.t1 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f3() *[]int { return &r.f3 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f4() *[]*int { return &r.f4 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f5() *[]t1 { return &r.f5 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f6() *[]*t1 { return &r.f6 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f7() **[]*t1 { return &r.f7 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f8() **[]*context.Context { return &r.f8 }")
-		assert.Contains(t, registrations, "func (r *t2) GRLmaddr_t2_f9() *atomic.Bool { return &r.f9 }")
-		assert.Contains(t, registrations, `"sync/atomic"`)
 		// t.Logf("registrations: %s", registrations)
 
 		err := r.Rewrite(ModeReload)
 		require.NoError(t, err)
 
-		funcEquals(r, "GRLfvar_F", "func() { *GRLuaddr_v3() = V4 }")
-		funcEquals(r, "GRLfvar_F2", "func() { V4 = *GRLuaddr_v3() V4 = *GRLuaddr_v3() + 5 V4 = 6 + *GRLuaddr_v3() }")
-		funcEquals(r, "GRLfvar_F3", "func() { var v_t2 GRLt_t2 V4 = *v_t2.GRLmaddr_t2_f1() }")
-		funcEquals(r, "GRLfvar_F4", `func() { fmt.Printf("%v %p %v %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4) }`)
-		funcEquals(r, "GRLfvar_F5", "func() { GRLuaddr_v6().Lock() }")
-		funcEquals(r, "GRLfvar_F6", "func() { **GRLuaddr_v7() += 0.1 }")
+		funcEquals(r, "GRLfvar_F", "func() { GRLx_v3 = V4 }")
+		funcEquals(r, "GRLfvar_F2", "func() { V4 = GRLx_v3 V4 = GRLx_v3 + 5 V4 = 6 + GRLx_v3 }")
+		funcEquals(r, "GRLfvar_F3", "func() { var v_t2 GRLx_t2 V4 = v_t2.GRLx_f1 }")
+		funcEquals(r, "GRLfvar_F4", `func() { fmt.Printf("%v %p %v %p", GRLx_v3, &GRLx_v3, V4, &V4) }`)
+		funcEquals(r, "GRLfvar_F5", "func() { GRLx_v6.Lock() }")
+		funcEquals(r, "GRLfvar_F6", "func() { *GRLx_v7 += 0.1 }")
 		funcEquals(r, "GRLfvar_F7", "func(ctx ContextAlias) { <-ctx.Done() var ctx2 ContextAlias _ = ctx2 }")
 		funcEquals(r, "GRLfvar_F8", "func(a int, b float32) (int, float32) { return a, b }")
 		// t.Logf("output: %s", output)
@@ -648,7 +633,7 @@ func F9(_ int, b float32, _ string) float32 { return b }
 	}
 
 	{
-		_, pkg, _, _, registrations := rewriteTrim(`
+		_, pkg, _, registrations := rewriteTrim(`
 import (
 	"github.com/got-reload/got-reload/pkg/fake/dup1/dup"
 )
@@ -658,7 +643,7 @@ var X dup.I
 		dupPkg := pkg.Imports["github.com/got-reload/got-reload/pkg/fake/dup1/dup"]
 		byt, err := extract.GenContent("github.com/got-reload/got-reload/pkg/fake",
 			pkg.Name, dupPkg.PkgPath, dupPkg.Types,
-			nil, nil, nil, nil, extract.NewImportTracker(pkg.Name, pkg.PkgPath))
+			nil, nil, extract.NewImportTracker(pkg.Name, pkg.PkgPath))
 		require.NoError(t, err)
 		// t.Logf("dup registrations:\n%s", byt)
 		registrations = filterWhitespace(byt)
@@ -667,7 +652,7 @@ var X dup.I
 	}
 
 	{
-		_, _, _, _, registrations := rewriteTrim(`
+		_, _, output, _ := rewriteTrim(`
 import (
 	// reminder that the base pkg is called "fake". It should be referred to
 	// w/out a package qualifier. This import is a different package and its
@@ -679,12 +664,12 @@ type s struct {
 	f1 fake.T
 }
 `)
-		// t.Logf("fake registrations:\n%s", registrations)
-		assert.Contains(t, registrations, "func (r *s) GRLmaddr_s_f1() *fake.T { return &r.f1 }")
+		// t.Logf("output:\n%s", output)
+		assert.Contains(t, output, "type GRLx_s struct { GRLx_f1 fake.T }")
 	}
 
 	{
-		_, _, output, _, registrations := rewriteTrim(`
+		_, _, output, registrations := rewriteTrim(`
 import (
 	"github.com/got-reload/got-reload/pkg/fake/internal"
 	"sync/atomic"
@@ -696,14 +681,14 @@ type T2 struct {
 
 func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f }
 `)
-		// t.Logf("fake registrations:\n%s", registrations)
+		// t.Logf("registrations:\n%s", registrations)
 		assert.Contains(t, registrations, `"GRLfvar_T2_F": reflect.ValueOf(&GRLfvar_T2_F).Elem()`)
-		assert.Contains(t, registrations, `func (r *T2) GRLmaddr_T2_f() *internal.T_thisIsInternal { return &r.f }`)
 
-		// t.Logf("fake output:\n%s", output)
+		// t.Logf("output:\n%s", output)
+		assert.Contains(t, output, "type T2 struct { GRLx_f internal.T_thisIsInternal }")
 		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return GRLfvar_T2_F(t, b) }")
 		assert.Contains(t, output, "var GRLfvar_T2_F func(t *T2, b atomic.Bool) internal.T_thisIsInternal")
-		assert.Contains(t, output, "func init() { GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T_thisIsInternal { return t.f } }")
+		assert.Contains(t, output, "func init() { GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T_thisIsInternal { return t.GRLx_f } }")
 
 		// Change T2.F and reload
 		//
@@ -734,7 +719,7 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
 		assert.Contains(t, newR.NewFunc[newR.Pkgs[0].PkgPath], "GRLfvar_T2_F")
 		// t.Logf("newR.NewFunc: %#v", newR.NewFunc)
 
-		funcEquals(newR, "GRLfvar_T2_F", "func(t *T2, b atomic.Bool) GRLt_internal_T_thisIsInternal { return t.f + 1 }")
+		funcEquals(newR, "GRLfvar_T2_F", "func(t *T2, b atomic.Bool) GRLt_internal_T_thisIsInternal { return t.GRLx_f + 1 }")
 
 		// TODO: There could of course be multiple types with the same basename
 		// in *different* internal packages, sigh.
@@ -742,19 +727,19 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
 
 	// No registration for a variable of an exported type.
 	{
-		_, _, _, _, registrations := rewriteTrim(`
+		_, _, _, registrations := rewriteTrim(`
 import (
 	"github.com/got-reload/got-reload/pkg/fake/other"
 )
 
 var unexportedVar = other.F()
 `)
-		// t.Logf("fake registrations:\n%s", registrations)
+		// t.Logf("registrations:\n%s", registrations)
 		assert.NotContains(t, registrations, "func GRLuaddr_unexportedVar")
 	}
 
 	{
-		_, _, _, _, registrations := rewriteTrim(`
+		_, _, output, registrations := rewriteTrim(`
 func F() {
 	type foo_bar struct {
 		foo int
@@ -765,21 +750,23 @@ func F() {
 type foo_baz struct { foo int; baz float32 }
 
 `)
-		// t.Logf("fake registrations:\n%s", registrations)
-		assert.NotContains(t, registrations, `func (r *foo_bar)`)
-		assert.Contains(t, registrations, `func (r *foo_baz)`)
+		t.Logf("registrations:\n%s", registrations)
+		assert.NotContains(t, registrations, `foo_bar`)
+		assert.Contains(t, output, `type GRLx_foo_baz struct { GRLx_foo int GRLx_baz float32 }`)
+		assert.Contains(t, registrations, `"GRLx_foo_baz": reflect.ValueOf((*GRLx_foo_baz)(nil))`)
 	}
 
 	// If you declare "type foo time.Time", make sure we don't generate
 	// accessors for foo.wall and so on.
 	{
-		_, _, _, _, registrations := rewriteTrim(`import "time"; type myTime time.Time`)
-		// t.Logf("fake registrations:\n%s", registrations)
+		_, _, output, registrations := rewriteTrim(`import "time"; type myTime time.Time`)
+		// t.Logf("registrations:\n%s", registrations)
 		assert.NotContains(t, registrations, "func (r *myTime)")
+		assert.Contains(t, output, "type GRLx_myTime time.Time")
 	}
 
 	{
-		r, _, output, _, registrations := rewriteTrim(`
+		r, _, output, registrations := rewriteTrim(`
 type S struct {
 	key int
 }
@@ -817,8 +804,8 @@ func f5(i int) S {
 
 `)
 		_, _ = output, registrations
-		// t.Logf("fake registrations:\n%s", registrations)
-		// t.Logf("fake output:\n%s", output)
+		// t.Logf("registrations:\n%s", registrations)
+		// t.Logf("output:\n%s", output)
 
 		newR := NewRewriter()
 		newR.Config = r.Config
@@ -831,13 +818,35 @@ func f5(i int) S {
 
 		// t.Logf("reloaded output:\n%s", formatNode(t, newR.Pkgs[0].Fset, newR.Pkgs[0].Syntax[0]))
 
-		funcEquals(newR, "GRLfvar_f", "func(s S) int { return (*GRLuaddr_m())[*s.GRLmaddr_S_key()] }")
-		funcEquals(newR, "GRLfvar_f2", "func() { *GRLuaddr_ch() <- 5 }")
-		funcEquals(newR, "GRLfvar_f3", "func() { for k, v := range *GRLuaddr_m() { _, _ = k, v } }")
-		funcEquals(newR, "GRLfvar_f4", "func() int { *GRLuaddr_v()++ return *GRLuaddr_v() }")
-		funcEquals(newR, "GRLfvar_f5", "func(i int) S { return S{ key: i, } }")
+		funcEquals(newR, "GRLfvar_f", "func(s S) int { return GRLx_m[s.GRLx_key] }")
+		funcEquals(newR, "GRLfvar_f2", "func() { GRLx_ch <- 5 }")
+		funcEquals(newR, "GRLfvar_f3", "func() { for k, v := range GRLx_m { _, _ = k, v } }")
+		funcEquals(newR, "GRLfvar_f4", "func() int { GRLx_v++ return GRLx_v }")
+		funcEquals(newR, "GRLfvar_f5", "func(i int) S { return S{ GRLx_key: i, } }")
 
 		// t.Logf("newR.NewFunc: %#v", newR.NewFunc)
+	}
+
+	// Make sure we don't rewrite init() functions.
+	{
+		_, _, output, _ := rewriteTrim(`func init() { panic("") }`)
+		// t.Logf("registrations:\n%s", registrations)
+		assert.NotContains(t, output, "func GRLx_init")
+		assert.Contains(t, output, "func init()")
+	}
+
+	{
+		_, _, output, registrations := rewriteTrim(`const i = 0`)
+		// t.Logf("registrations:\n%s", registrations)
+		assert.Contains(t, output, "const GRLx_i = 0")
+		assert.Contains(t, registrations,
+			`"GRLx_i": reflect.ValueOf(constant.MakeFromLiteral("0", token.INT, 0)),`)
+	}
+
+	{
+		_, _, output, _ := rewriteTrim(`func f[T any](x T) T { return x }`)
+		// t.Logf("registrations:\n%s", registrations)
+		assert.Contains(t, output, "func f[T any](x T) T { return x }")
 	}
 
 	if false {
@@ -929,31 +938,6 @@ func formatNode(t *testing.T, fset *token.FileSet, node ast.Node) string {
 	require.NoError(t, err)
 	return filterWhitespace(b.String())
 }
-
-// // Do some diagnostics (maybe) even if tests fail.
-// defer func() {
-// 	if false {
-// 		// General diagnostics.
-// 		var buf bytes.Buffer
-
-// 		// Formatted output file
-// 		err = format.Node(&buf, pkg.Fset, file)
-// 		require.NoError(err)
-// 		t.Logf("%s", buf.String())
-// 		// // File AST
-// 		// buf = bytes.Buffer{}
-// 		// ast.Fprint(&buf, pkg.Fset, file, ast.NotNilFilter)
-// 		// Printf("%s", buf.String())
-
-// 		// What should the rewritten target_func() look like, ast-wise?
-// 		targetNode, err := parser.ParseFile(pkg.Fset, "target", targetFile, 0)
-// 		require.NoError(err)
-// 		require.NotNil(targetNode)
-// 		buf = bytes.Buffer{}
-// 		ast.Fprint(&buf, pkg.Fset, targetNode, ast.NotNilFilter)
-// 		t.Logf("target: %s", buf.String())
-// 	}
-// }()
 
 // Needs *a lot* of updating.
 func _TestFirstCompile(t *testing.T) {

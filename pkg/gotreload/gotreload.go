@@ -54,13 +54,7 @@ type (
 		// Per-package supplemental information.  Used only in initial rewrite.
 		Info map[*packages.Package]*Info
 
-		funcs    map[*ast.FuncDecl]string
-		stubVars map[string]bool
-		// var name -> its type's name
-		needsAccessor            map[string]string
-		needsPublicType          map[string]string
-		needsFieldAccessor       map[string]map[*types.Struct]extract.FieldAccessor // field name -> struct type -> stuff
-		needsPublicMethodWrapper map[string]bool                                    // not used?
+		needsPublicType map[string]string
 	}
 
 	Info struct {
@@ -147,171 +141,48 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package) error {
 	}
 	// log.Printf("Pkg: %#v", pkg)
 
-	definedInThisPackage := map[types.Object]bool{}
-	r.funcs = map[*ast.FuncDecl]string{}
-	r.stubVars = map[string]bool{}
-	// This tags unexported variables to generate accessor functions. We
-	// *could* just generate new variables with the address of the unexported
-	// variable, but we need to generate accessor methods for struct fields
-	// later (see needsFieldAccessor), so we might as well just keep things
-	// simple and do accessor functions here too.
-	r.needsAccessor = map[string]string{}
-	// This stores structs and their fields that need public accessor
-	// functions. The method name needs to contain the type name because we
-	// index them by name in the generated Exports map. So e.g. if struct S1
-	// has field f1 and struct S2 has field f1, we need to be able to
-	// distinguish them just by name, so e.g. GRLf_f1 would not be enough, they
-	// need to be GRLf_S1f1 and GRLf_S2f1.
-	r.needsFieldAccessor = map[string]map[*types.Struct]extract.FieldAccessor{}
-	r.needsPublicMethodWrapper = map[string]bool{}
-	// needsPublicFuncWrapper := map[string]*types.Signature{}
-	// needsPublicFuncWrapper := map[string]string{} // ident name => stubPrefix + ident.Name
 	r.needsPublicType = map[string]string{}
+	funcs := map[*ast.FuncDecl]string{}
+	stubVars := map[string]bool{}
 	imports := extract.NewImportTracker(pkg.Name, pkg.PkgPath)
 
-DEFS:
-	for ident, obj := range pkg.TypesInfo.Defs {
-		if ident.Name == "_" || obj == nil {
-			continue
-		}
-		// log.Printf("Rewrite: Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
-		if typeName, ok := obj.(*types.TypeName); ok {
-			// if typeName.Name() == "myTime" {
-			// 	log.Printf("Rewrite: TypeName Def: %#v, Obj: %#v, Parent: %#v", ident, obj, obj.Parent())
-			// }
-			if named, ok := typeName.Type().(*types.Named); ok {
-				// log.Printf("Rewrite: Named Def: %#v, Obj: %#v, TypeString: %s, Underlying: %#v",
-				// 	named, named.Obj(), types.TypeString(typeName.Type(), nil), named.Underlying())
-
-				for n, p := 0, obj.Parent(); p != nil; p = p.Parent() {
-					// log.Printf("Parent: %d: %#v", n, p)
-					n++
-					if n > 2 {
-						// log.Printf("WARNING: Not generating accessors for type %q", ident.Name)
-						continue DEFS
-					}
-				}
-
-				publicTypeName := typeName.Name()
-				// if !named.Obj().Exported() {
-				// 	publicTypeName = utypePrefix + publicTypeName
-				// 	r.needsPublicType[typeName.Name()] = publicTypeName
-				// }
-
-				// log.Printf("Rewrite: Named Def: %#v, Obj: %#v, TypeString: %s", named, named.Obj(), types.TypeString(typeName.Type(), nil))
-				if s, ok := named.Underlying().(*types.Struct); ok {
-					for i := 0; i < s.NumFields(); i++ {
-						field := s.Field(i)
-						if field.Exported() {
-							continue
-						}
-						// This is an unexported field of a struct from some other
-						// package, e.g. given "type myTime time.Time; var t
-						// myTime", t.wall, or t.ext, or t.loc.
-						if field.Pkg() != pkg.Types {
-							// log.Printf("Skipping Var %d: %#v, pkg: %#v", i, field, field.Pkg().Path())
-							continue
-						}
-
-						// if named, ok := field.Type().(*types.Named); ok && !named.Obj().Exported() {
-						// 	log.Printf("WARNING: Skipping %s.%s: type not exported", ident.Name, field.Name())
-						// 	continue
-						// }
-
-						// hasInternal := false
-						fieldTypeName := types.TypeString(field.Type(), func(p *types.Package) string {
-							// hasInternal = hasInternal || util.InternalPkg(p.Path())
-							return imports.GetAlias(p.Name(), p.Path())
-						})
-						// if hasInternal {
-						// publicTypeName = utypePrefix + "internal_" + publicTypeName
-						// r.needsPublicType[typeName.Name()] = publicTypeName
-						// log.Printf("WARNING: Skipping accessor for %s.%s since it requires a type from an internal package",
-						// 	typeName.Name(), field.Name())
-						// continue
-						// }
-
-						fieldName := field.Name()
-						methodName := methodUAddrPrefix + typeName.Name() + "_" + fieldName
-						// log.Printf("Tagging struct %s.%s for an addr method: %s", typeName.Name(), fieldName, methodName)
-						if r.needsFieldAccessor[fieldName] == nil {
-							r.needsFieldAccessor[fieldName] = map[*types.Struct]extract.FieldAccessor{}
-						}
-						r.needsFieldAccessor[fieldName][s] = extract.FieldAccessor{
-							Var:       field,
-							RType:     publicTypeName,
-							AddrName:  methodName,
-							FieldType: fieldTypeName,
-						}
-					}
-				}
-			}
-		}
-
-		// Look at struct fields and methods in interfaces.
-		if obj.Parent() == nil {
-			switch obj := obj.(type) {
-			// Struct field names
-			case *types.Var:
-
-			// Method names in interfaces. Might be wrong and/or simpler to do
-			// with Defs as for struct types, above.
-			case *types.Func:
-				if !obj.Exported() {
-					// Probably not quite right? Need the type of the struct the
-					// field is in, and the type of the field.
-					r.needsPublicMethodWrapper[ident.Name] = true
-				}
-				tagForTranslation(pkg, r.funcs, obj)
-
-			default:
-				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
-			}
-			continue
-		}
-		if obj.Parent() != pkg.Types.Scope() {
-			// Skip any item (variable, type, etc) not at package scope.
-			continue
-		}
-		if !obj.Exported() {
-			switch obj := obj.(type) {
-			case *types.Var:
-				// log.Printf("%s: type: %#v", ident.Name, obj)
-
-				typeName := types.TypeString(obj.Type(), func(p *types.Package) string {
-					return imports.GetAlias(p.Name(), p.Path())
-				})
-				// What I want is: Is the type from the current package, or if it
-				// isn't, is the typename exported? So: If it doesn't have a ".",
-				// it's fine, or if it does, if the character after the dot is
-				// "exported", then set it as needing an accessor.
-				//
-				// I'd really rather walk the type tree, but that would require
-				// duplicating rather a lot of types.TypeString, which I'd rather
-				// avoid.
-				//
-				// To my surprise there's nothing like a "walk" function for a
-				// type tree. If there is, TypeString doesn't use it.
-				if index := strings.Index(typeName, "."); index == -1 ||
-					len(typeName) > index && token.IsExported(typeName[index+1:]) {
-
-					// log.Printf("needsAccessor: %p %#v, defs: %#v", ident, ident, pkg.TypesInfo.Defs[ident])
-					r.needsAccessor[ident.Name] = typeName
-				}
-			case *types.TypeName:
-				public := utypePrefix + ident.Name
-				r.needsPublicType[ident.Name] = public
-			case *types.Func:
-				// needsPublicFuncWrapper[ident.Name] = obj.Type().(*types.Signature)
-				// needsPublicFuncWrapper[ident.Name] = stubPrefix + ident.Name
-			}
-		}
-		if obj, ok := obj.(*types.Func); ok {
-			tagForTranslation(pkg, r.funcs, obj)
-		}
-		definedInThisPackage[obj] = true
+	type exportRec struct {
+		orig string
+		new  string
 	}
+	exported := map[types.Object]exportRec{}
+	// Find everything in this package that's at package scope and not exported,
+	// and export it, in-place, by adding a GRLx_ prefix.
+	for ident, obj := range pkg.TypesInfo.Defs {
+		_, isFunc := obj.(*types.Func)
+		if ident.IsExported() ||
+			ident.Name == "_" ||
+			obj == nil ||
+			obj.Pkg() != pkg.Types ||
+			(obj.Parent() != nil && obj.Parent() != pkg.Types.Scope()) ||
+			(ident.Name == "init" && isFunc) {
+
+			continue
+		}
+		// Skip generic functions and methods.
+		if s, ok := obj.Type().(*types.Signature); ok && (s.TypeParams().Len() > 0 || s.RecvTypeParams().Len() > 0) {
+			continue
+		}
+		exported[obj] = exportRec{
+			orig: ident.Name,
+			new:  "GRLx_" + ident.Name,
+		}
+		ident.Name = exported[obj].new
+	}
+
 	for ident, obj := range pkg.TypesInfo.Uses {
+		// Find everything that references any of the above exported objects, and
+		// reset their names.
+		if rec, ok := exported[obj]; ok {
+			ident.Name = rec.new
+		}
+
+		// Note "internal" types that need non-internal aliases.
 		switch obj := obj.(type) {
 		case *types.TypeName:
 			if pkg := obj.Pkg(); pkg != nil && util.InternalPkg(pkg.Path()) {
@@ -325,13 +196,46 @@ DEFS:
 		}
 	}
 
-	r.stubTopLevelFuncs(pkg, r.funcs, ModeRewrite)
+	for ident, obj := range pkg.TypesInfo.Defs {
+		if ident.Name == "_" || obj == nil {
+			continue
+		}
+		// log.Printf("Rewrite: Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
+
+		// Look at struct fields and methods in interfaces.
+		if obj.Parent() == nil {
+			switch obj := obj.(type) {
+			// Struct field names
+			case *types.Var:
+
+			// Method names in interfaces. Might be wrong and/or simpler to do
+			// with Defs as for struct types, above.
+			case *types.Func:
+				tagForTranslation(pkg, funcs, obj)
+
+			default:
+				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
+			}
+			continue
+		}
+
+		if obj.Parent() != pkg.Types.Scope() {
+			// Skip any item (variable, type, etc) not at package scope.
+			continue
+		}
+
+		if obj, ok := obj.(*types.Func); ok {
+			tagForTranslation(pkg, funcs, obj)
+		}
+	}
+
+	r.stubTopLevelFuncs(pkg, funcs, ModeRewrite)
 
 	// Generate symbol registrations
 	// log.Printf("Looking for stubVars for pkg %s", pkg.PkgPath)
 	for stubVar := range r.NewFunc[pkg.PkgPath] {
 		// log.Printf("stubVar: %s", stubVar)
-		r.stubVars[stubVar] = true
+		stubVars[stubVar] = true
 	}
 
 	// Write new source files for this package, based on the rewritten
@@ -344,8 +248,7 @@ DEFS:
 
 	registrationSource, err := extract.GenContent(newDir+"/grl_unknown.go",
 		pkg.Name, pkg.PkgPath, pkg.Types,
-		r.stubVars,
-		r.needsAccessor, r.needsPublicType, r.needsFieldAccessor, imports)
+		stubVars, r.needsPublicType, imports)
 	if err != nil {
 		return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
 	}
@@ -396,111 +299,6 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 			// log.Printf("reload: I see: Obj: %#v", c.Node())
 			switch n := c.Node().(type) {
 			case *ast.Ident:
-				_, needsAccessor := r.needsAccessor[n.Name]
-				uses, hasUses := pkg.TypesInfo.Uses[n]
-				if needsAccessor && hasUses && (uses.Parent() == nil || uses.Parent() == pkg.Types.Scope()) {
-					// log.Printf("needsAccessor during reload: %p %#v Uses: %#v, Defs: %#v", n, n, pkg.TypesInfo.Uses[n], pkg.TypesInfo.Defs[n])
-					switch parent := c.Parent().(type) {
-					// things that implement ast.Expr:
-					// BadExpr        // can probably skip
-					// Ident          // can probably skip -- seems redundant, sort of?
-					// Ellipsis       // can probably skip
-					// BasicLit       // can probably skip
-					// FuncLit        // can probably skip
-					// CompositeLit
-					// ParenExpr      // can probably skip
-					// SelectorExpr   // done
-					// IndexExpr      // done
-					// IndexListExpr
-					// SliceExpr
-					// TypeAssertExpr
-					// CallExpr       // done
-					// StarExpr       // done
-					// UnaryExpr      // done
-					// BinaryExpr     // done
-					// KeyValueExpr
-					// ArrayType
-					// StructType
-					// FuncType
-					// InterfaceType
-					// MapType
-					// ChanType
-
-					case *ast.ValueSpec:
-					case *ast.AssignStmt, *ast.BinaryExpr, *ast.CallExpr, *ast.StarExpr,
-						*ast.IndexExpr, *ast.SendStmt, *ast.RangeStmt, *ast.ReturnStmt,
-						*ast.IncDecStmt:
-
-						// Transform <var1> into *funcUAddrPrefix+<var1> in
-						// assignments, expressions, and function call arguments.
-						c.Replace(
-							&ast.StarExpr{
-								X: &ast.CallExpr{
-									Fun: &ast.Ident{Name: funcUAddrPrefix + n.Name},
-								},
-							})
-
-					case *ast.UnaryExpr:
-						// Similar to the above, except without the StarExpr to
-						// deref the pointer returned by the function.
-						replace[parent] =
-							&ast.CallExpr{
-								Fun: &ast.Ident{Name: funcUAddrPrefix + n.Name},
-							}
-
-					case *ast.SelectorExpr:
-						replace[parent] =
-							&ast.SelectorExpr{
-								X: &ast.CallExpr{
-									Fun: &ast.Ident{Name: funcUAddrPrefix + n.Name},
-								},
-								Sel: &ast.Ident{Name: parent.Sel.Name},
-							}
-
-					case *ast.Field:
-						// ignore
-
-					default:
-						buf := bytes.Buffer{}
-						ast.Fprint(&buf, pkg.Fset, parent, ast.NotNilFilter)
-						log.Printf("path %s:\n%s", n.Name, buf.String())
-						// panic(fmt.Sprintf("Unknown node type in expression involving %s", n.Name))
-					}
-				}
-				if _, ok := r.needsFieldAccessor[n.Name]; ok {
-					pos := pkg.Fset.Position(n.Pos())
-					_ = pos
-					// log.Printf("%s: needsFieldAccessor? %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, par, pkg.TypesInfo.Uses[n])
-					if se, ok := c.Parent().(*ast.SelectorExpr); ok {
-						if selIdent, ok := se.X.(*ast.Ident); ok {
-							if obj, ok := pkg.TypesInfo.Uses[selIdent]; ok {
-								if named, ok := obj.Type().(*types.Named); ok {
-									if s, ok := named.Underlying().(*types.Struct); ok {
-										// log.Printf("%s: setting replacement: %s, %#v; parent: %#v; Uses: %#v", pos, n.Name, n, c.Parent(), pkg.TypesInfo.Uses[n])
-										replace[c.Parent()] =
-											&ast.StarExpr{
-												X: &ast.CallExpr{
-													Fun: &ast.SelectorExpr{
-														X:   &ast.Ident{Name: selIdent.Name},
-														Sel: &ast.Ident{Name: r.needsFieldAccessor[n.Name][s].AddrName},
-													}}}
-									} else {
-										// preErr = fmt.Errorf("%s: struct type not found for %s; underlying: %#v", pos, n.Name, named.Underlying())
-										// return false
-									}
-								} else {
-									// I don't think this is an error, actually
-									// preErr = fmt.Errorf("%s: types.Named not found for %s; found %#v", pos, n.Name, pkg.TypesInfo.Uses[selIdent].Type())
-									// return false
-								}
-							} else {
-							}
-						} else {
-							// preErr = fmt.Errorf("%s: SelectorExpr not found for %s", pos, n.Name)
-							// return false
-						}
-					}
-				}
 				if publicType, ok := r.needsPublicType[n.Name]; ok {
 					switch c.Parent().(type) {
 					case *ast.ValueSpec:
@@ -859,14 +657,23 @@ func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet,
 }
 
 func (r *Rewriter) FuncDef(pkgPath, stubVar string) (string, error) {
+	pkg, node := r.FuncNode(pkgPath, stubVar)
+	if pkg == nil || node == nil {
+		return "", fmt.Errorf("No stubVar found for %s:%s", pkgPath, stubVar)
+	}
+	b := &bytes.Buffer{}
+	// log.Printf("NewFunc[%s][%s]", pkgPath, stubVar)
+	format.Node(b, pkg.Fset, node)
+	return b.String(), nil
+}
+
+func (r *Rewriter) FuncNode(pkgPath, stubVar string) (*packages.Package, *ast.FuncLit) {
 	for _, pkg := range r.Pkgs {
 		if pkg.PkgPath != pkgPath {
 			continue
 		}
-		b := &bytes.Buffer{}
 		// log.Printf("NewFunc[%s][%s]", pkgPath, stubVar)
-		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][stubVar])
-		return b.String(), nil
+		return pkg, r.NewFunc[pkgPath][stubVar]
 	}
-	return "", fmt.Errorf("No stubVar found for %s:%s", pkgPath, stubVar)
+	return nil, nil
 }

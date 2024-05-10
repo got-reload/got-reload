@@ -420,7 +420,7 @@ func filter(selfName string, args []string) {
 			if err != nil {
 				log.Fatalf("Error writing filtered version of %s to %s: %v", outputFileName, outputFilePath, err)
 			}
-			log.Printf("Wrote %s", outputFilePath)
+			// log.Printf("Wrote %s", outputFilePath)
 		}
 
 		outputFilePath := filepath.Join(newDir, "grl_register.go")
@@ -428,7 +428,7 @@ func filter(selfName string, args []string) {
 		if err != nil {
 			log.Fatalf("Error writing %s: %v", outputFilePath, err)
 		}
-		log.Printf("Wrote %s", outputFilePath)
+		// log.Printf("Wrote %s", outputFilePath)
 
 		allImportedPackages(allImports, pkg)
 	}
@@ -452,9 +452,7 @@ func filter(selfName string, args []string) {
 		fname := filepath.Join(path, "grl_"+strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(pkg.PkgPath)+".go")
 		registrationSource, err := extract.GenContent(fname,
 			pkg0.Name, pkg.PkgPath, pkg.Types,
-			nil,
-			nil, nil, nil,
-			extract.NewImportTracker("", ""))
+			nil, nil, extract.NewImportTracker("", ""))
 		if err != nil {
 			log.Fatalf("Failed generating symbol registration for %q: %v", pkg.PkgPath, err)
 		}
