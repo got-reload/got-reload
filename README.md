@@ -5,35 +5,57 @@ Function/method-level stateful hot reloading for Go!
 ## Status
 
 Very much work in progress. The usage of this tool changes pretty much daily
-as we iterate on it. That being said, it is usually usable for some definition
+as we iterate on it. That being said, it is kind-of usable for some definition
 of "usable."
 
 ## Do you have a demo?
 
-Clone this repo somewhere and do the following within the repo's root directory:
+Yes!
+
+The first is strictly terminal-based, the second is a small Giu UI GUI
+program.
+
+### Terminal-based demo
+
+First: Install got-reload:
+
+    # terminal-based demo
+    go install github.com/got-reload/got-reload@latest
+
+Then: Clone github.com/got-reload/demo locally and do the following within
+that repo's root directory:
 
 ```sh
-go run ./cmd/got-reload run -p github.com/got-reload/got-reload/demo/example ./demo/
-# press enter a few times to see the method get invoked and to watch the
-# package-level variable get incremented
+cd /path/to/demo
+got-reload run \
+    -p github.com/got-reload/demo/example,github.com/got-reload/demo/example2 \
+    github.com/got-reload/demo
 ```
 
-In a different terminal, return to the *original* cloned repo and edit one of
+Press enter a few times to see the method get invoked and to watch the
+package-level variable get incremented.
+
+In a different window, return to the *original* cloned repo and edit one of
 the function definitions in `demo/example` or `demo/example2`. For starters,
-just make it return a different constant.
+just make it return a different constant. (And then save the file.)
 
 You should see the running program discover the changes and reload the definition
 of the function. Press enter a few more times to watch the return value change.
 
 Note how the package-level variable's state was not reset by the reload.
 
-You can also try our Gio-based GUI live editing demo:
+### GUI-based demo
+
+Clone github.com/git-reload/giodemo
 
 ```sh
-go run ./cmd/got-reload run -p github.com/got-reload/got-reload/giodemo/reloadable ./giodemo/
+cd /path/to/giodemo
+got-reload run -p github.com/got-reload/giodemo/reloadable github.com/got-reload/giodemo
 ```
 
-Try altering the layout function defined in `./giodemo/reloadable/reloadable.go`. See the comments for ideas.
+Try altering the layout function defined in `giodemo/reloadable/reloadable.go`.
+See the comments in the file for ideas. Some familiarity with Gio is useful
+here.
 
 ## Inspiration
 
@@ -61,31 +83,31 @@ into this
 
 ```go
 func Foo(... args ...) (...return values...) {
-  return GRLf_Foo(...args...)
+  return GRLfvar_Foo(...args...)
 }
 
-var GRLf_Foo = func(...args...) (...return values...) {
-   // body
-}
+var GRLfvar_Foo func(...args...) (...return values...)
 
-func GRLset_Foo(f func(...Foo's signature)...) {
-  GRLf_Foo = f
+func init() {
+  GRLfvar_Foo func(...args...) (...return values...) {
+    // body
+  }
 }
 ```
 
 and similarly for methods.
 
-Export all named private package-level variables, types, interfaces, and
-struct field names, by adding "GRL_" to the front.
+We also export all private package-level variables, types, interfaces, and
+struct field names, by adding "GRLx_" to the front.
 
 (None of this is done in-place, it's all performed on a temporary copy of the
-packages being filtered.  No original source code is changed.)
+packages being filtered. No original source code is changed.)
 
 ### We watch your source for changes at runtime
 
 When a filtered source file changes, it will be read, parsed, and changed
 functions will be installed with new versions of themselves via the generated
-`GRLset_*` functions, via [Yaegi](https://github.com/traefik/yaegi), a Go
+`GRLfvar_*` variables, via [Yaegi](https://github.com/traefik/yaegi), a Go
 interpreter.
 
 ## Limitations
@@ -96,13 +118,21 @@ interpreter.
     - Cannot redefine functions that never return. If your whole program runs an event loop that iterates indefinitely over some channels, the new definition of that event loop function will never be invoked because the old one never returned.
     - Cannot redefine `main` or `init` functions (even if you could, it would have no effect. Your program has already started, so these functions have already executed.)
 
-- Current practical limitations (things we hope to eventually work around)
+- Current practical limitations (things we be able to eventually work around)
 
     - You cannot change function signatures.
-    - You cannot redefine types (add/remove/change fields).
+    - You cannot redefine types (add/remove/change fields) or add new types.
     - You cannot add new package-scope variables or constants during a reload (this should be easy to fix, just haven't gotten to it).
-    - You cannot gain new module dependencies during a reload.  That said, you _can_ import any package that your module _already_ imports transitively.  So if X imports Y and you only import X, then you can later import Y without issue.  You can also import any package in the standard library, which is already built-in to Yaegi.
-    - You cannot reload any symbols in the `main` package.  You can work around this by just copying your current `main` code to (for example) grl_main, exporting `main` as `Main`, and rewriting your real `main` to just call `grl_main.Main()`.  Eventually we'll teach the filter how to do this for you.  ([Issue 5](https://github.com/got-reload/got-reload/issues/5))
+    - You cannot gain new module dependencies during a reload. That said, you _can_ import any package that your module _already_ imports transitively. So if X imports Y and you only import X, then you can later import Y without issue. You can also import any package in the standard library, which is already built-in to Yaegi.
+    - You cannot reload any symbols in the `main` package. You can work around this by just copying your current `main` code to (for example) grl_main, exporting `main` as `Main`, and rewriting your real `main` to just call `grl_main.Main()`. Eventually we'll teach the filter how to do this for you. ([Issue 5](https://github.com/got-reload/got-reload/issues/5))
+
+- Known bugs
+
+    - Updating variables in reloaded code directly has some bugs. You can't always just use `foo`, sometimes you have use `*&foo`.
+
+      got-reload could rewrite every mention of the former into the latter, but I'd rather just define the problem well enough to submit an issue to Yaegi and get them to fix it. So far that has been kind of elusive.
+    - got-reload/Yaegi have problems with packages referred to by aliases (`import foo "github.com/path/to/bar"`).
+    - Sufficiently large Gio programs have problems with some packages, like gioui.org/widget/material. Not sure what's going on there yet; it works fine in the giodemo repository.
 
 ## Who came up with this harebrained idea?
 
@@ -115,12 +145,12 @@ has done this yet, to be honest.
 
 ## Can I use it now?
 
-Yes? Kinda depends on your tolerance for jank and breaking changes. If you can
-survive the fact that the CLI may change on a daily basis, then sure!
+Maybe. It works in the demos, and on some functions in a larger app, but fails
+in many cases. (See above under "known bugs".)
 
 ## Can I support the development of this tool?
 
-Yes!  We appreciate stars, watchers, feedback, and, of course, pull requests!  A PR need not necessarily be code, of course; it could be documentation, or something else.  Whatever itch you care to scratch.
+Yes! We appreciate stars, watchers, feedback, and, of course, pull requests! A PR need not necessarily be code, of course; it could be documentation, or something else. Whatever itch you care to scratch.
 
 You can also sponsor the developers:
 

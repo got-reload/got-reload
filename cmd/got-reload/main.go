@@ -102,13 +102,18 @@ var subcommands = map[string]func(selfName string, args []string){
 }
 
 func run(selfName string, args []string) {
-	var packages string
-	var verbose, keep bool
+	var packagesCSV string
+	var verbose bool
+	var useDir string
+	// var keep bool
+
 	set := flag.NewFlagSet(selfName, flag.ExitOnError)
-	set.StringVar(&packages, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
-	set.StringVar(&packages, "p", "", "Short form of \"-pkgs\"")
-	set.BoolVar(&verbose, "v", false, "Pass -v to \"go run\" command") // currently ignored
-	set.BoolVar(&keep, "keep", false, "Keep all the filtered code")    // currently ignored
+	// set.BoolVar(&keep, "keep", false, "Keep all the filtered code")    // currently ignored
+	set.StringVar(&packagesCSV, "pkgs", "", "The comma-delimited list of packages to enable for hot reload")
+	set.StringVar(&packagesCSV, "p", "", "Short form of \"-pkgs\"")
+	set.BoolVar(&verbose, "v", false, "Pass -v to \"go run\" command")
+	set.StringVar(&useDir, "dir", "", "The directory to use instead of $TMPDIR/gotreload-*")
+	set.StringVar(&useDir, "d", "", "Short form of \"-dir\"")
 	set.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
 
@@ -118,6 +123,11 @@ Flags:
 
 `, selfName)
 		set.PrintDefaults()
+		fmt.Fprintf(flag.CommandLine.Output(), `
+-dir/-d - If you specify this option, it's up to you to clean up the directory
+			 before each use. We are wary of running the equivalent of "rm -rf
+			 $dir/*" ourselves.
+`)
 	}
 	if err := set.Parse(args); err != nil {
 		set.Usage()
@@ -125,8 +135,8 @@ Flags:
 	}
 	runPackage := set.Arg(0)
 
-	packageList := strings.Split(packages, ",")
-	if len(packageList) < 1 {
+	packages := strings.Split(packagesCSV, ",")
+	if len(packages) < 1 {
 		log.Fatal("No hot-reload packages specified")
 	}
 
@@ -145,16 +155,15 @@ Flags:
 		absExecutable = os.Args[0]
 	}
 
-	// TODO(whereswaldon):
-	// Procedure
-	// - create temporary directory
-
-	// workDir, err := os.MkdirTemp("", "gotreload-*")
-	// if err != nil {
-	// 	log.Fatalf("Unable to create work directory: %v", err)
-	// }
-
-	workDir := "/tmp/got-reload"
+	var workDir string
+	if useDir == "" {
+		workDir, err = os.MkdirTemp("", "gotreload-*")
+		if err != nil {
+			log.Fatalf("Unable to create work directory: %v", err)
+		}
+	} else {
+		workDir = useDir
+	}
 
 	// - copy entire local module into temporary directory using dup.Copy
 	path, err := goListSingle("-m", "-f", "{{.Dir}}")
@@ -166,12 +175,12 @@ Flags:
 		log.Fatalf("Failed copying files to working dir: %v", err)
 	}
 	// - invoke filter command on that copy
-	cmdArgs := append([]string{"filter", "-dir", workDir}, packageList...)
+	cmdArgs := append([]string{"filter", "-dir", workDir}, packages...)
 	if err := runWithIO(absExecutable, cmdArgs...); err != nil {
 		log.Fatalf("Failed rewriting code: %v", err)
 	}
 	// - invoke go run on the filtered codebase
-	os.Setenv(reloader.PackageListEnv, packages)
+	os.Setenv(reloader.PackageListEnv, packagesCSV)
 	os.Setenv(reloader.StartReloaderEnv, "1")
 	paths, err := goListSingle("-f", "{{.Dir}} {{.ImportPath}}", runPackage)
 	if err != nil {
@@ -192,11 +201,16 @@ Flags:
 	if err := runWithIOIn(workDir, "go", "get", "./..."); err != nil {
 		log.Fatalf("Failed running go get ./...: %v", err)
 	}
+	// The above "go get" seems to take care of this?
 	// if err := runWithIOIn(workDir, "go", "mod", "tidy"); err != nil {
 	// 	log.Fatalf("Failed running go mod tidy: %v", err)
 	// }
-	runArgs := append([]string{"run", "-v", string(mainPath)}, set.Args()[1:]...)
-	// if err := runWithIOIn(workDir, "go", "run", "-v", string(mainPath)); err != nil {
+	runArgs := []string{"run"}
+	if verbose {
+		runArgs = append(runArgs, "-v")
+	}
+	runArgs = append(runArgs, string(mainPath))
+	runArgs = append(runArgs, set.Args()[1:]...)
 	if err := runWithIOIn(workDir, "go", runArgs...); err != nil {
 		log.Fatalf("Failed running go run: %v", err)
 	}
@@ -254,94 +268,6 @@ Where subcommand is one of: %v
 	} else {
 		cmd(executable+" "+subcommand, os.Args[1:])
 	}
-}
-
-// Not currently used
-func rewrite(r *gotreload.Rewriter, targetFileName string) (outputFileName string, err error) {
-	// log.Printf("rewrite %s", targetFileName)
-
-	fileNode, fset, err := r.LookupFile(targetFileName)
-	if err != nil {
-		return "", err
-	}
-
-	// log.Printf("Writing filtered version of %s", targetFileName)
-	b := bytes.Buffer{}
-	err = format.Node(&b, fset, fileNode)
-	if err != nil {
-		return "", fmt.Errorf("Error writing filtered version of %s: %w", targetFileName, err)
-	}
-	return writeTempFile(b.Bytes(), targetFileName)
-}
-
-// Not currently used
-func writeTempFile(source []byte, targetFileName string) (string, error) {
-	outputFile, err := os.CreateTemp("", "gotreloadable-*-"+filepath.Base(targetFileName))
-	if err != nil {
-		return "", fmt.Errorf("Error opening dest file: %w", err)
-	}
-	outputFileName := outputFile.Name()
-	defer func() {
-		if closeerr := outputFile.Close(); closeerr != nil {
-			if err == nil {
-				// if we didn't fail for another reason, fail for this
-				err = fmt.Errorf("Error closing file: %w", closeerr)
-			}
-		}
-	}()
-
-	err = os.WriteFile(outputFileName, source, 0600)
-	if err != nil {
-		return "", err
-	}
-	return outputFileName, nil
-}
-
-// Write the grl_dependencies file for each pkg.
-//
-// Not used.
-func addDependencies(packageList []string) ([]string, error) {
-	r := gotreload.NewRewriter()
-	err := r.Load(packageList...)
-	if err != nil {
-		return nil, err
-	}
-
-	var deps []string
-
-	for _, pkg := range r.Pkgs {
-		if len(pkg.Syntax) == 0 {
-			continue
-		}
-		file := pkg.Syntax[0]
-		pkgName := file.Name.Name
-		fileName := pkg.Fset.Position(file.Pos()).Filename
-		dir := filepath.Dir(fileName)
-		fullpath := filepath.Join(dir, "grl_dependencies.go")
-		err := os.WriteFile(fullpath,
-			[]byte(fmt.Sprintf(`package %s
-
-import (
-	"reflect"
-
-	"github.com/got-reload/got-reload/pkg/reloader"
-	_ "github.com/got-reload/got-reload/pkg/reloader/start"
-)
-
-var (
-	_ = reflect.ValueOf
-	_ = reloader.RegisterAll
-)
-`, pkgName)),
-			0600)
-		if err != nil {
-			return deps, fmt.Errorf("Error writing %s/grl_dependencies.go: %w", pkgName, err)
-		}
-		deps = append(deps, fullpath)
-		// log.Printf("Wrote %s", fullpath)
-	}
-
-	return deps, nil
 }
 
 func filter(selfName string, args []string) {
