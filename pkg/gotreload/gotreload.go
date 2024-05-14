@@ -12,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/got-reload/got-reload/pkg/extract"
 	"github.com/got-reload/got-reload/pkg/util"
@@ -281,13 +279,6 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 	// log.Printf("Pkg: %#v", pkg)
 
 	for _, file := range pkg.Syntax {
-		// b := &bytes.Buffer{}
-		// err := format.Node(b, pkg.Fset, file)
-		// if err != nil {
-		// 	panic(err)
-		// }
-		// log.Printf("reload: before\n%s", b.String())
-
 		replace := map[ast.Node]ast.Node{}
 		pre := func(c *astutil.Cursor) bool {
 			// log.Printf("reload: I see: Obj: %#v", c.Node())
@@ -318,39 +309,9 @@ func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
 			panic(fmt.Sprintf("Internal error: replace map should be used up & empty, but it has %d values in it: %v",
 				len(replace), replace))
 		}
-
-		// b = &bytes.Buffer{}
-		// err = format.Node(b, pkg.Fset, file)
-		// if err != nil {
-		// 	panic(err)
-		// }
-		// log.Printf("reload: after\n%s", b.String())
 	}
-
-	// b := bytes.Buffer{}
-	// err = format.Node(&b, pkg.Fset, file)
-	// if err != nil {
-	// 	return fmt.Errorf("Error formatting updated file: %w", err)
-	// }
-	// log.Printf("Updated file: %s", b.String())
 	return nil
 }
-
-// not used
-func makeExported(s string) string {
-	r, sz := utf8.DecodeRuneInString(s)
-	return string(unicode.ToUpper(r)) + s[sz:]
-}
-
-// assureExported takes unexported identifiers, adds a prefix to export them,
-// and marks the associated object for later use.
-// func assureExported(exported map[types.Object]bool, ident *ast.Ident, obj types.Object) {
-// 	if obj.Exported() {
-// 		return
-// 	}
-// 	ident.Name = exportPrefix + ident.Name
-// 	exported[obj] = true
-// }
 
 // tagForTranslation finds the function/method declaration obj is in, and tags
 // it for translation.
@@ -462,8 +423,8 @@ func (r *Rewriter) Print(root string) error {
 	return nil
 }
 
-// Updates node in place, and returns newVar and setFunc to be added to the
-// AST after node.
+// Updates node in place, and returns newVar, newInit, and the funcLit to be
+// added to the AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
 func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (string, *ast.GenDecl, *ast.FuncDecl, *ast.FuncLit) {
