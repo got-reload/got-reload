@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/got-reload/got-reload/pkg/extract"
+	something_else "github.com/got-reload/got-reload/pkg/fake/different_name"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/traefik/yaegi/interp"
@@ -402,7 +403,7 @@ func TestSampleFuncRewrites(t *testing.T) {
 }
 
 func TestEvalInPackage(t *testing.T) {
-	i := interp.New(interp.Options{})
+	i := interp.New(interp.Options{BuildTags: []string{"yaegi_test"}})
 	require.NotNil(t, i)
 
 	var v int = 8
@@ -410,18 +411,54 @@ func TestEvalInPackage(t *testing.T) {
 		"pkg/pkg": {
 			"V": reflect.ValueOf(&v).Elem(),
 		},
+		// "github.com/got-reload/got-reload/pkg/fake/different_name/something_else": {
+		// 	"T": reflect.ValueOf((*something_else.T)(nil)),
+		// },
+		"github.com/got-reload/got-reload/pkg/fake/different_name/can_be_anything": {
+			"T": reflect.ValueOf((*something_else.T)(nil)),
+		},
 	})
 	i.ImportUsed()
 
-	// Can you refer to V without a package identifier?
-	_, err := i.Eval(`import . "pkg"; func init() { V = 9 }`)
-	require.NoError(t, err)
-	assert.Equal(t, 9, v)
+	// // Can you refer to V without a package identifier?
+	// _, err := i.Eval(`import . "pkg"; func init() { *&V = 9 }`)
+	// require.NoError(t, err)
+	// assert.Equal(t, 9, v)
 
-	// Can you do it again in the same interpreter?
-	_, err = i.Eval(`import . "pkg"; func init() { V = 10 }`)
+	// // Can you do it again in the same interpreter?
+	// _, err = i.Eval(`import . "pkg"; func init() { *&V = 10 }`)
+	// require.NoError(t, err)
+	// assert.Equal(t, 10, v)
+
+	v = 0
+	_, err := i.Eval(`package main; import . "pkg"; func main() { dnT := &different_name.T{F:1}; *&V = dnT.F }`)
 	require.NoError(t, err)
-	assert.Equal(t, 10, v)
+	assert.Equal(t, 1, v)
+
+	// // You can't just use "something_else"
+	// v = 0
+	// _, err = i.Eval(`func main() { seT := &something_else.T{F:1}; *&V = seT.F }`)
+	// assert.Error(t, err)
+
+	// // "dn" fails too -- because why wouldn't it? It's (almost?) obvious now that
+	// // I know what I'm doing wrong, sigh.
+	// v = 0
+	// _, err = i.Eval(`func main() { seT := &dn.T{F:1}; *&V = seT.F }`)
+	// assert.Error(t, err)
+
+	// // Can you make a variable of type something_else.T?
+	// v = 0
+	// _, err = i.Eval(`import something_else "github.com/got-reload/got-reload/pkg/fake/different_name"; ` +
+	// 	`func main() { seT := &something_else.T{F:1}; *&V = seT.F }`)
+	// require.NoError(t, err)
+	// assert.Equal(t, 1, v)
+
+	// // How 'bout now?
+	// v = 0
+	// _, err = i.Eval(`import se "github.com/got-reload/got-reload/pkg/fake/different_name"; ` +
+	// 	`func main() { seT := &se.T{F:1}; *&V = seT.F }`)
+	// require.NoError(t, err)
+	// assert.Equal(t, 1, v)
 }
 
 var notExported int = 5
@@ -454,7 +491,7 @@ func TestCompileParse(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, r.Pkgs)
 
-		err = r.Rewrite(ModeRewrite)
+		err = r.Rewrite(ModeRewrite, true)
 		require.NoError(t, err)
 		require.NotNil(t, r.Pkgs)
 		require.NotZero(t, len(r.Pkgs))
@@ -613,7 +650,7 @@ func F9(_ int, b float32, _ string) float32 { return b }
 		assert.Contains(t, registrations, `"ContextAlias": reflect.ValueOf((*ContextAlias)(nil))`)
 		// t.Logf("registrations: %s", registrations)
 
-		err := r.Rewrite(ModeReload)
+		err := r.Rewrite(ModeReload, false)
 		require.NoError(t, err)
 
 		funcEquals(r, "GRLfvar_F", "func() { GRLx_v3 = V4 }")
@@ -712,9 +749,9 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
 		}
 		newR.Load("../fake")
 
-		err := newR.Rewrite(ModeRewrite)
+		err := newR.Rewrite(ModeRewrite, true)
 		require.NoError(t, err)
-		err = newR.Rewrite(ModeReload)
+		err = newR.Rewrite(ModeReload, false)
 		require.NoError(t, err)
 		assert.Contains(t, newR.NewFunc[newR.Pkgs[0].PkgPath], "GRLfvar_T2_F")
 		// t.Logf("newR.NewFunc: %#v", newR.NewFunc)
@@ -750,7 +787,7 @@ func F() {
 type foo_baz struct { foo int; baz float32 }
 
 `)
-		t.Logf("registrations:\n%s", registrations)
+		// t.Logf("registrations:\n%s", registrations)
 		assert.NotContains(t, registrations, `foo_bar`)
 		assert.Contains(t, output, `type GRLx_foo_baz struct { GRLx_foo int GRLx_baz float32 }`)
 		assert.Contains(t, registrations, `"GRLx_foo_baz": reflect.ValueOf((*GRLx_foo_baz)(nil))`)
@@ -811,9 +848,9 @@ func f5(i int) S {
 		newR.Config = r.Config
 		newR.Load("../fake")
 
-		err := newR.Rewrite(ModeRewrite)
+		err := newR.Rewrite(ModeRewrite, true)
 		require.NoError(t, err)
-		err = newR.Rewrite(ModeReload)
+		err = newR.Rewrite(ModeReload, false)
 		require.NoError(t, err)
 
 		// t.Logf("reloaded output:\n%s", formatNode(t, newR.Pkgs[0].Fset, newR.Pkgs[0].Syntax[0]))

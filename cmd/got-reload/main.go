@@ -308,7 +308,7 @@ func filter(selfName string, args []string) {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	err = r.Rewrite(gotreload.ModeRewrite)
+	err = r.Rewrite(gotreload.ModeRewrite, true)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}

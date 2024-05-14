@@ -180,6 +180,8 @@ func GenContent(
 		return imports.GetAlias(pkg.Name(), pkg.Path())
 	}
 
+	var skippedMethods []string
+
 NAME:
 	for _, name := range sc.Names() {
 		o := sc.Lookup(name)
@@ -277,8 +279,9 @@ NAME:
 									// Also not sure if we shouldn't just skip the
 									// whole interface, if we can't wrap every method
 									// in it.
-									log.Printf("WARNING: %s: Skipping method %s.%s; this may impact what interfaces this type implements",
-										n.Obj().Name(), typ[name], fName)
+									// log.Printf("WARNING: %s: Skipping method %s.%s; this may impact what interfaces this type implements",
+									// 	n.Obj().Name(), typ[name], fName)
+									skippedMethods = append(skippedMethods, typ[name])
 
 									// Not sure I need this, given that I essentially
 									// run "goimports" later.
@@ -319,6 +322,9 @@ NAME:
 				wrap[name] = Wrap{prefix + name, methods}
 			}
 		}
+	}
+	if len(skippedMethods) > 0 {
+		log.Printf("WARNING: Skipped methods on these types: %v", skippedMethods)
 	}
 
 	// Create a val slot for all the generated stubVar functions (GRLfvar_XXX),

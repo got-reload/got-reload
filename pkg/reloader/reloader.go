@@ -9,6 +9,7 @@ package reloader
 import (
 	"context"
 	"fmt"
+	"go/ast"
 	lpkg "log"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 	"github.com/traefik/yaegi/stdlib"
 	"github.com/traefik/yaegi/stdlib/unrestricted"
 	"github.com/traefik/yaegi/stdlib/unsafe"
+	goimports "golang.org/x/tools/imports"
 )
 
 const (
@@ -34,10 +36,11 @@ const (
 
 var (
 	// Use our own logger.
-	log = lpkg.New(os.Stderr, "", lpkg.Lshortfile|lpkg.Lmicroseconds)
+	log = lpkg.New(os.Stderr, "GRL: ", lpkg.Lshortfile|lpkg.Lmicroseconds)
 
 	// WatchedPkgs is the list of packages being watched for live reloading.
-	// It is populated at init time from the process environment.
+	// It is populated at init time from the process environment,
+	// $GOT_RELOAD_PKGS.
 	WatchedPkgs = watchPackages()
 	// PkgsToDirs and DirsToPkgs provide convenient lookups between local
 	// disk directories and go package names.
@@ -47,10 +50,13 @@ var (
 	mux               sync.Mutex
 	registerRead      bool
 
+	// A mux for accessing r, the gotreload.Rewriter
+	rMux sync.Mutex
+
 	registerAllWG sync.WaitGroup
 )
 
-// This returns a value so that it can be used in a blank var expression, e.g.
+// Add returns a value so that it can be used in a blank var expression, e.g.
 //
 //	var _ = Add()
 //
@@ -127,8 +133,6 @@ func watchDirs() (pkgToDir map[string]string, dirToPkg map[string]string) {
 	return
 }
 
-var rMux sync.Mutex
-
 // StartWatching returns a channel and a new gotreload.Rewriter. The channel
 // emits a series of filenames (absolute paths) that've changed.
 func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewriter, error) {
@@ -138,17 +142,17 @@ func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewr
 	if err != nil {
 		log.Fatalf("Error parsing packages: %v", err)
 	}
-	err = r.Rewrite(gotreload.ModeRewrite)
+	err = r.Rewrite(gotreload.ModeRewrite, false)
 	if err != nil {
 		log.Fatalf("Error rewriting packages: %s: %v", list, err)
 	}
-	err = r.Rewrite(gotreload.ModeReload)
+	err = r.Rewrite(gotreload.ModeReload, false)
 	if err != nil {
 		log.Fatalf("Error reloading packages: %s: %v", list, err)
 	}
 
 	log.Printf("WatchedPkgs: %v, PkgsToDirs: %v, DirsToPkgs: %v", WatchedPkgs, PkgsToDirs, DirsToPkgs)
-	changesCh := make(chan string, 1)
+	changedCh := make(chan string, 1)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, nil, nil, err
@@ -162,7 +166,7 @@ func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewr
 	}
 	exitCh := make(chan struct{})
 	go func() {
-		defer close(changesCh)
+		defer close(changedCh)
 		defer watcher.Close()
 		for {
 			select {
@@ -171,7 +175,7 @@ func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewr
 					abs, _ := filepath.Abs(event.Name)
 					rMux.Lock()
 					if _, _, err := r.LookupFile(abs); err == nil {
-						changesCh <- abs
+						changedCh <- abs
 					} else {
 						// log.Printf("An unknown file changed: %s", abs)
 					}
@@ -184,207 +188,273 @@ func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewr
 			}
 		}
 	}()
-	return changesCh, exitCh, r, nil
+	return changedCh, exitCh, r, nil
 }
 
 func Start() {
 	log.Println("Starting reloader")
-	changesCh, exitCh, r, err := StartWatching(WatchedPkgs)
+	changedCh, exitCh, r, err := StartWatching(WatchedPkgs)
 	if err != nil {
 		log.Printf("Error starting watcher; reloading will not work: %v", err)
 		return
 	}
 
-	const dur = 100 * time.Millisecond
-	go func() {
-		// Give the rest of the initialization proceses a moment to roll along
-		// and, one hopes, do so Adds on registerAllWG.
-		time.Sleep(time.Second)
+	go rlLoop(r, changedCh, exitCh, 100*time.Millisecond)
+}
 
-		// signal the watcher to shutdown if we exit
-		defer close(exitCh)
+func rlLoop(r *gotreload.Rewriter, changedCh <-chan string, exitCh chan struct{}, dur time.Duration) {
+	// Give the rest of the initialization processes a moment to roll along and,
+	// one hopes, do some Adds on registerAllWG.
+	time.Sleep(time.Second)
 
-		// Wait until all RegisterAlls have finished to continue
-		registerAllWG.Wait()
+	// signal the watcher to shutdown if we exit
+	defer close(exitCh)
+
+	// Wait until all RegisterAlls have finished to continue
+	log.Println("Reloader waiting for all RegisterAll calls to finish")
+	registerAllWG.Wait()
+	mux.Lock()
+	registerRead = true
+	mux.Unlock()
+	log.Println("Reloader continuing")
+
+	// log.Printf("Registered symbols: %v", RegisteredSymbols)
+
+	var timer *time.Timer
+	changed := map[string]bool{}
+
+	_, interpErr := getInterp()
+	if interpErr != nil {
+		log.Printf("Error creating an interpreter, reloading will not work: %v", interpErr)
+		return
+	}
+
+	for change := range changedCh {
 		mux.Lock()
-		registerRead = true
-		mux.Unlock()
-		log.Println("Reloader continuing")
-
-		// log.Printf("Registered symbols: %v", RegisteredSymbols)
-
-		var timer *time.Timer
-		changes := map[string]bool{}
-
-		i, err := getInterp()
-
-		if err != nil {
-			log.Printf("Error creating an interpreter, reloading will not work: %v", err)
+		if interpErr != nil {
+			mux.Unlock()
 			return
 		}
 
-		for change := range changesCh {
+		if !changed[change] {
+			log.Printf("Changed: %s", change)
+			changed[change] = true
+		}
+
+		// The AfterFunc is sort of a poor-man's "debounce" function. We
+		// accumulate changed files into "changed" and call the "afterfunc"
+		// after "dur" time has passed with no new changes.
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(dur, func() {
 			mux.Lock()
-			if !changes[change] {
-				log.Printf("Changed: %s", change)
-				changes[change] = true
+			defer mux.Unlock()
+
+			timer = nil
+			interpErr = processChanges(r, changed)
+		})
+		mux.Unlock()
+
+	}
+}
+
+func processChanges(r *gotreload.Rewriter, changed map[string]bool) error {
+	for updated := range changed {
+		log.Printf("Reparsing package containing %s", updated)
+		newR := gotreload.NewRewriter()
+		newR.Config.Dir = os.Getenv(SourceDirEnv)
+
+		// Load with file=<foo> loads the package that contains the
+		// given file.
+		err := newR.Load("file=" + updated)
+		if err != nil {
+			log.Fatalf("Error parsing package containing file %s: %v", updated, err)
+		}
+
+		// Rewrite the package in "reload" mode
+		err = newR.Rewrite(gotreload.ModeRewrite, false)
+		if err != nil {
+			log.Fatalf("Error rewriting package for %s: %v", updated, err)
+		}
+		// FIXME: Have Rewrite w/ModeReload call ModeRewrite itself, or
+		// merge them in some better way.
+		err = newR.Rewrite(gotreload.ModeReload, false)
+		if err != nil {
+			log.Fatalf("Error reloading package for %s: %v", updated, err)
+		}
+
+		err = processSingleChange(r, newR, changed)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) error {
+	rMux.Lock()
+	defer rMux.Unlock()
+
+	newPkg := newR.Pkgs[0]
+	// log.Printf("Looking for pkg %s", newPkg.PkgPath)
+	pkgPath := newR.Pkgs[0].PkgPath
+
+	log.Printf("Looking for updated functions in %s", pkgPath)
+
+	// Look at all stubbed functions, and build a map of only those in files that
+	// changed.
+	allStubVars := newR.NewFunc[newR.Pkgs[0].PkgPath]
+	possiblyChangedStubVars := map[string]*ast.FuncLit{}
+	seen := map[string]bool{}
+	for stubVar, funcLit := range allStubVars {
+		name := newPkg.Fset.Position(funcLit.Pos()).Filename
+		if !changed[name] {
+			continue
+		}
+		seen[name] = true
+		possiblyChangedStubVars[stubVar] = funcLit
+		// log.Printf("Might've changed: %s", stubVar)
+	}
+	// Delete all seen files from the map of changed files.
+	for name := range seen {
+		delete(changed, name)
+	}
+
+	updatedFound := false
+	// Look at all the functions that might've changed, because of being in one
+	// of the files that changed.
+	for stubVar, funcLit := range possiblyChangedStubVars {
+		// log.Printf("Looking at %s: %s", pkgPath, stubVar)
+
+		// Get a string version of the old function definition
+		origDefStr, err := r.FuncDef(pkgPath, stubVar)
+		if err != nil {
+			log.Printf("Error getting function definition of %s:%s: %v", pkgPath, stubVar, err)
+			continue
+		}
+		// Get a string version of the new function definition
+		//
+		// TODO: Use the funcLit that we already have from above.
+		newDefStr, err := newR.FuncDef(pkgPath, stubVar)
+		if err != nil {
+			log.Printf("Error getting new function definition of %s:%s: %v", pkgPath, stubVar, err)
+			continue
+		}
+
+		if origDefStr == newDefStr {
+			continue
+		}
+
+		updatedFound = true
+
+		log.Printf("%s is new", stubVar)
+
+		// Get the named imports (if any) from the changed file
+		changedFile := gotreload.FindFile(newPkg, funcLit.Pos())
+		namedImportsList := []string{}
+		for _, imp := range changedFile.Imports {
+			if imp.Name == nil || imp.Name.Name == "" {
+				continue
 			}
+			// Note that imp.Path.Value includes the surrounding
+			// double-quotes of the import.
+			namedImportsList = append(namedImportsList,
+				fmt.Sprintf("%s %s", imp.Name.Name, imp.Path.Value))
+		}
+		var namedImports string
+		if len(namedImportsList) > 0 {
+			namedImports = strings.Join(namedImportsList, "\n")
+			log.Printf("Named imports:\n%s", namedImports)
+			namedImports = fmt.Sprintf("import (\n%s\n)", namedImports)
+		}
 
-			// The AfterFunc is sort of a poor-man's "debounce" function. We
-			// accumulate changed files into "changes" and call the "afterfunc"
-			// after "dur" time has passed with no new changes.
-			if timer != nil {
-				timer.Stop()
-			}
-			timer = time.AfterFunc(dur, func() {
-				mux.Lock()
-				timer = nil
-				defer mux.Unlock()
-
-				for updated := range changes {
-					log.Printf("Reparsing package containing %s", updated)
-					newR := gotreload.NewRewriter()
-					newR.Config.Dir = os.Getenv(SourceDirEnv)
-
-					// Load with file=<foo> loads the package that contains the
-					// given file.
-					err := newR.Load("file=" + updated)
-					if err != nil {
-						log.Fatalf("Error parsing package containing file %s: %v", change, err)
-					}
-
-					// Rewrite the package in "reload" mode
-					err = newR.Rewrite(gotreload.ModeRewrite)
-					if err != nil {
-						log.Fatalf("Error rewriting package for %s: %v", change, err)
-					}
-					// FIXME: Have Rewrite w/ModeReload call ModeRewrite itself, or
-					// merge them in some better way.
-					err = newR.Rewrite(gotreload.ModeReload)
-					if err != nil {
-						log.Fatalf("Error reloading package for %s: %v", change, err)
-					}
-
-					// Ignore any other files from the same package that also
-					// changed.
-					newPkg := newR.Pkgs[0]
-					for _, fileNode := range newPkg.Syntax {
-						name := newPkg.Fset.Position(fileNode.Pos()).Filename
-						if name == updated {
-							continue
-						}
-						// log.Printf("Ignoring %s since it's in the same package", name)
-						delete(changes, name)
-					}
-
-					rMux.Lock()
-
-					// log.Printf("Looking for pkg %s", newPkg.PkgPath)
-					pkgPath := newR.Pkgs[0].PkgPath
-					stubVars := newR.NewFunc[newR.Pkgs[0].PkgPath]
-
-					log.Printf("Looking for updated functions in %s", pkgPath)
-					// TODO: This works by formatting every function in the
-					// package. That's really slow. It'd be nice to at least only
-					// look at the functions in the files that changed. It'd also
-					// be nice to compare the data structures directly, instead of
-					// formatting it and then comparing the strings.
-					for stubVar := range stubVars {
-						// log.Printf("Looking at %s: %s", pkgPath, stubVar)
-
-						// Get a string version of the old function definition
-						origDefStr, err := r.FuncDef(pkgPath, stubVar)
-						if err != nil {
-							log.Printf("Error getting function definition of %s:%s: %v",
-								pkgPath, stubVar, err)
-							continue
-						}
-						// Get a string version of the new function definition
-						newDefStr, err := newR.FuncDef(pkgPath, stubVar)
-						if err != nil {
-							log.Printf("Error getting new function definition of %s:%s: %v",
-								pkgPath, stubVar, err)
-							continue
-						}
-
-						if origDefStr == newDefStr {
-							continue
-						}
-
-						log.Printf("%s is new (%s)", stubVar, strings.Split(newDefStr, "\n")[0])
-						// log.Printf("Call %s: %s", stubVar, newDef)
-
-						// newDefStr, _ := newR.FuncDef(pkgPath, stubVar)
-						setStub := fmt.Sprintf(`%s = %s`, stubVar, newDefStr)
-
-						mainStub := fmt.Sprintf(`package main
+		mainFunc := fmt.Sprintf(`package main
+%s
 import . %q
 func main() {
-	%s
-}`, newR.Pkgs[0].PkgPath, setStub)
+	%s = %s
+}`, namedImports, newR.Pkgs[0].PkgPath, stubVar, newDefStr)
 
-						panicked := false
-						// Catch Yaegi panics
-						func() {
-							// defer func() {
-							// 	if r := recover(); r != nil {
-							// 		err = fmt.Errorf("Eval panicked: %v", r)
-							// 		panicked = true
-							// 	}
-							// }()
-							_, err = i.Eval(mainStub)
-						}()
-
-						if panicked {
-							log.Printf("ERROR: Interpreter panicked: %v", err)
-							i, err = getInterp()
-							if err != nil {
-								log.Printf("ERROR: Can't create a new interpreter, reloading will not work any more: %v", err)
-								rMux.Unlock()
-								return
-							}
-							continue
-						}
-
-						if err == nil {
-							log.Printf("Ran %s", stubVar)
-						} else {
-							errStr := err.Error()
-							log.Printf("Eval error: %s", errStr)
-							var line int
-							_, err := fmt.Sscanf(errStr, "%d:", &line)
-							if err == nil && line-1 >= 0 {
-								log.Printf("%d: %s", line, strings.Split(mainStub, "\n")[line-1])
-							} else {
-								// log.Printf("Cannot parse line number")
-								for i, line := range strings.Split(mainStub, "\n") {
-									// i+1 because any error (of course) takes into
-									// account the "package" (etc) lines.
-									log.Printf("%d: %s", i+1, line)
-								}
-								// log.Printf("Eval error (again): %v", err)
-							}
-						}
-					}
-
-					// Update r with data from newR
-					for i, pkg := range r.Pkgs {
-						if pkg.PkgPath == pkgPath {
-							// log.Printf("Replacing %s in r", pkgPath)
-							r.Pkgs[i] = newPkg
-							break
-						}
-					}
-					r.NewFunc[pkgPath] = newR.NewFunc[pkgPath]
-
-					rMux.Unlock()
-
-					delete(changes, updated)
-				}
-			})
-			mux.Unlock()
+		// Run "goimports" on the generated main() function.
+		//
+		// TODO: Could probably adapt astutil.UsesImport for this.
+		updatedFilename := newPkg.Fset.Position(changedFile.Pos()).Filename
+		byts, err := goimports.Process(updatedFilename, []byte(mainFunc), nil)
+		if err != nil {
+			log.Printf("failed to 'goimports' source for %s: %v", stubVar, err)
+			log.Printf("Main func: %s", mainFunc)
+			continue
 		}
-	}()
+		mainFunc = string(byts)
+
+		// log.Printf("Main:\n%s", mainFunc)
+
+		// Getting a new interp for every function is overkill, but it's the only
+		// way I can see, so far, to not get duplicate import errors if you eval
+		// the same function twice, or change two functions in the same file at
+		// the same time.
+		i, err := getInterp()
+		if err != nil {
+			log.Printf("Error getting a new interp: %v", err)
+			return err
+		}
+
+		panicked := false
+		// Catch Yaegi panics
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("Eval panicked: %v", r)
+					panicked = true
+				}
+			}()
+
+			_, err = i.Eval(mainFunc)
+		}()
+
+		if panicked {
+			log.Printf("ERROR: Interpreter panicked: %v", err)
+			continue
+		}
+
+		if err == nil {
+			log.Printf("Ran %s", stubVar)
+		} else {
+			errStr := err.Error()
+			log.Printf("Eval error: %s", errStr)
+			var line int
+			_, err := fmt.Sscanf(errStr, "%d:", &line)
+			if err == nil && line-1 >= 0 {
+				log.Printf("%d: %s", line, strings.Split(mainFunc, "\n")[line-1])
+			} else {
+				// log.Printf("Cannot parse line number")
+				for i, line := range strings.Split(mainFunc, "\n") {
+					// i+1 because any error (of course) takes into
+					// account the "package" (etc) lines.
+					log.Printf("%d: %s", i+1, line)
+				}
+				// log.Printf("Eval error (again): %v", err)
+			}
+			// log.Printf("Main func: %s", mainFunc)
+		}
+		// log.Printf("Main func: %s", mainFunc)
+	}
+	if !updatedFound {
+		log.Printf("(Didn't find any.)")
+	}
+
+	// Update r with data from newR
+	for i, pkg := range r.Pkgs {
+		if pkg.PkgPath == pkgPath {
+			// log.Printf("Replacing %s in r", pkgPath)
+			r.Pkgs[i] = newPkg
+			break
+		}
+	}
+	r.NewFunc[pkgPath] = newR.NewFunc[pkgPath]
+
+	return nil
 }
 
 func getInterp() (*interp.Interpreter, error) {
