@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/got-reload/got-reload/pkg/extract"
-	something_else "github.com/got-reload/got-reload/pkg/fake/different_name"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/traefik/yaegi/interp"
@@ -23,294 +22,6 @@ import (
 )
 
 const cmdPath = "github.com/got-reload/got-reload/cmd/got-reload"
-
-var (
-	testFile1 = mustFormat(`
-package fake
-
-import (
-	"bytes"
-	"errors"
-)
-
-type (
-	t1 int
-	T2 int
-	t3 struct {
-		t3f1 int
-		T3f2 int
-		T3f3 *t3
-		T3f4 uint32
-	}
-	T4 struct {
-		t4f1 int
-		T4f2 int
-	}
-	t5 interface {
-		t5m1() int
-		T5m2(t3) int
-		T5m3(x t3) int
-		T5m4() t3
-	}
-	T6 interface {
-		t6f1() int
-		T6f2() int
-	}
-	uint32 int
-	T7     struct {
-		t3
-		T4
-	}
-)
-
-var (
-	v1            int
-	V2            int
-	v3            t1
-	V4            t1
-	v5            T2
-	V5            T2
-	v6            bytes.Buffer
-	V7            bytes.Reader
-	v8            t3
-	V9            t3
-	V10           uint32
-	v13, V14, v15 t3
-	// Test a type defined in another file
-	v16 f2t1
-)
-
-func f1(a1 int, a2, a3 t1, a4 T2) (int, t1, error) {
-	type (
-		T8 struct {
-			t8f1 int
-			T8f2 int
-		}
-		t9 struct {
-			t9f1 int
-			T9f2 int
-		}
-	)
-
-	v1 = V2
-	v3 = V4
-	v8.t3f1 = V9.T3f2
-	var v11 t3
-	if v1 == V2 {
-		v11.t3f1 = v1
-	}
-	if v1 == V2 {
-		v11.T3f2 = v8.t3f1
-	}
-
-	f1v1 := T8{}
-	f1v2 := t9{}
-	f1v1.t8f1 = f1v2.t9f1
-
-	return v1, v3, errors.New("an error")
-}
-
-func F2() (ret_named t1) {
-	var v12 t1
-	return v12
-}
-
-func (r *t3) t3m1(a5 t5) (ret2_named int) {
-	a5.t5m1()
-	a5.T5m2(t3{})
-	r.t3f1 = r.T3f2
-	ret2_named = 0
-	return
-}
-
-func (r T4) T4m1() int {
-	r.t4f1 = r.T4f2
-	return 0
-}
-
-func (r T4) t5m1() {
-}
-
-// Named receiver with unnamed arg
-func (r T4) t4m2(int) int {
-	return 0
-}
-
-// Unnamed receiver with used arg
-func (T4) t4m3(a6 int) int {
-	return 0
-}
-
-// Variadic (use of "...") function
-func F3 (a, b, c int, i ...int) int {
-	return i[0]
-}
-`)
-
-	testFile2 = mustFormat(`
-package fake
-
-// Test a type defined in another file
-var f2v1 t1
-
-type (
-	f2t1 struct {
-		f1 float32
-		f2t1f1 int
-	}
-	f2t2 struct {
-		f1 float32
-		f2t2f1 int
-	}
-)
-`)
-
-	// Parse this and print out its AST to figure out what to generate for the
-	// rewritten functions.
-	targetFile = mustFormat(`
-package target
-
-import "sync"
-import "context"
-
-func target_func(arg ...int) int {
-	return arg[0]
-}
-
-func target_func2(arg ...int) int {
-	return GRLfvar_target_func2(arg...)
-}
-
-var GRLfvar_target_func2 func(arg ...int) int
-
-func init() {
-	GRLfvar_target_func2 = func(arg ...int) int {
-		return arg[0]
-	}
-}
-
-type T10 struct {
-	unexported_var int
-}
-
-func (r T10) unexported_method() int {
-	return GRLfvar_unexported_method()
-}
-
-type t11 struct {
-	unexported_var int
-	ExportedVar float32
-}
-
-var unexported_var int
-
-func GRLuaddr_unexported_var() *int { return &unexported_var }
-
-type GRLt_t11 = t11
-
-type t1 struct {
-	f1 int
-}
-
-var v3, V4 int
-
-var v5 sync.Mutex
-
-var v7 = new(float32)
-
-func F() { 
-	v3 = V4
-	*GRLuaddr_v3() = V4
-	V4 = v3
-	V4 = *GRLuaddr_v3()
-	V4 = v3 + 5
-	V4 = *GRLuaddr_v3() + 5
-
-	var v_t1 t1
-
-	v_t1.f1 = 5
-	*v_t1.GRLmaddr_t1_f1() = 5
-	V4 = v_t1.f1
-	V4 = *v_t1.GRLmaddr_t1_f1()
-
-	fmt.Printf("%v, %p, %v, %p", v3, &v3, V4, &V4)
-	fmt.Printf("%v, %p, %v, %p", *GRLuaddr_v3(), GRLuaddr_v3(), V4, &V4)
-
-	v5.Lock()
-	GRLuaddr_v5().Lock()
-
-	*v7 += 0.1
-	**GRLuaddr_v7() += 0.1
-
-}
-
-type ContextAlias = context.Context
-
-func F7(ctx ContextAlias) {
-	var ctx2 ContextAlias
-	_ = ctx2
-	<-ctx.Done()
-}
-
-func F7_rewrite(ctx ContextAlias) {
-	var ctx2 ContextAlias
-	_ = ctx2
-	<-ctx.Done()
-}
-
-// Type name needs work; this type and the next method need to be in the
-// grl_registrations.go file.
-type GRLt_xlat_t11 struct {
-	GRL_field_unexported_var int
-	ExportedVar float32
-}
-func (r *GRLt_xlat_t11) GRL_Xlat() *t11 {
-	return &t11{
-		unexported_var: r.GRL_field_unexported_var,
-		ExportedVar: r.ExportedVar,
-	}
-}
-
-func example() {
-	unexported_var = 1 // test set
-	if unexported_var == 0 { // test get
-	}
-
-	GRLuset_unexported_var(1) // test set
-	if GRLuget_unexported_var() == 0 { // test get
-	}
-
-	var v T10
-	dummy := v.unexported_var
-	dummy2 := *v.GRLuaddr_unexported_var()
-
-	v.unexported_var = 1
-	v.GRLuset_unexported_var(1)
-	*v.GRLuaddr_unexported_var() = 1
-
-	if v.unexported_var == 0 {}
-	if v.GRLuget_unexported_var() == 0 {}
-	if *v.GRLuaddr_unexported_var() == 0 {}
-
-
-	var v GRLt_t11
-	var vE GRLt_t11
-	v2 := t11{
-		unexported_var: 5,
-		ExportedVar: 6.0,
-	}
-	// The above should translate to the below (in real life, it should
-	// translate recursively). Not sure how this interacts with stuff you're
-	// not supposed to copy, like sync.Mutex. That might only be a linter
-	// error, though.
-	v3 := *(GRLt_xlat_t11{
-		GRL_field_unexported_var: 5,
-		ExportedVar: 6.0,
-	}.Xlat())
-}
-
-`)
-)
 
 var findWhitespace = regexp.MustCompile(`[ \n\t]+`)
 
@@ -334,74 +45,6 @@ func mustFormat(src string) string {
 	return string(res)
 }
 
-func TestSampleFuncRewrites(t *testing.T) {
-	i := interp.New(interp.Options{})
-	require.NotNil(t, i)
-
-	// Verify basic Go syntax, haha
-	var v int = 1
-	GRLuaddr_v := func() *int { return &v }
-	*GRLuaddr_v() = 2
-	assert.Equal(t, 2, v)
-	*GRLuaddr_v() += 2
-	assert.Equal(t, 4, v)
-
-	var f = new(float64)
-	var f2 float64
-	GRLuaddr_f := func() **float64 { return &f }
-	**GRLuaddr_f() = 2.0
-	assert.Equal(t, 2.0, *f)
-	**GRLuaddr_f() += 2.0
-	assert.Equal(t, 4.0, *f)
-	*GRLuaddr_f() = &f2
-	f2 = 5
-	assert.Equal(t, 5.0, **GRLuaddr_f())
-
-	// .../pkg_name/pkg_name => symbol => value
-	// type Exports map[string]map[string]reflect.Value
-	i.Use(interp.Exports{
-		"pkg/pkg": {
-			"V":          reflect.ValueOf(&v).Elem(),
-			"GRLuaddr_v": reflect.ValueOf(GRLuaddr_v),
-		},
-	})
-	i.ImportUsed()
-
-	t.Run(`import . "pkg"`, func(t *testing.T) {
-		_, err := i.Eval(`import . "pkg"`)
-		require.NoError(t, err)
-	})
-
-	t.Run("V", func(t *testing.T) {
-		val, err := i.Eval("V")
-		require.NoError(t, err)
-		assert.IsType(t, int(0), val.Interface())
-		assert.Equal(t, v, val.Interface().(int))
-	})
-	t.Run("GRLuaddr_v()", func(t *testing.T) {
-		val, err := i.Eval("GRLuaddr_v()")
-		require.NoError(t, err)
-		assert.IsType(t, new(int), val.Interface())
-		assert.Equal(t, &v, val.Interface().(*int))
-	})
-	t.Run("*GRLuaddr_v()", func(t *testing.T) {
-		val, err := i.Eval("*GRLuaddr_v()")
-		require.NoError(t, err)
-		assert.IsType(t, int(0), val.Interface())
-		assert.Equal(t, v, val.Interface().(int))
-	})
-	t.Run("*GRLuaddr_v() = 3", func(t *testing.T) {
-		_, err := i.Eval("*GRLuaddr_v() = 3")
-		require.NoError(t, err)
-		assert.Equal(t, v, 3)
-	})
-	t.Run("*GRLuaddr_v() += 2", func(t *testing.T) {
-		_, err := i.Eval("*GRLuaddr_v() += 2")
-		require.NoError(t, err)
-		assert.Equal(t, v, 5)
-	})
-}
-
 func TestEvalInPackage(t *testing.T) {
 	i := interp.New(interp.Options{BuildTags: []string{"yaegi_test"}})
 	require.NotNil(t, i)
@@ -411,54 +54,13 @@ func TestEvalInPackage(t *testing.T) {
 		"pkg/pkg": {
 			"V": reflect.ValueOf(&v).Elem(),
 		},
-		// "github.com/got-reload/got-reload/pkg/fake/different_name/something_else": {
-		// 	"T": reflect.ValueOf((*something_else.T)(nil)),
-		// },
-		"github.com/got-reload/got-reload/pkg/fake/different_name/can_be_anything": {
-			"T": reflect.ValueOf((*something_else.T)(nil)),
-		},
 	})
 	i.ImportUsed()
 
-	// // Can you refer to V without a package identifier?
-	// _, err := i.Eval(`import . "pkg"; func init() { *&V = 9 }`)
-	// require.NoError(t, err)
-	// assert.Equal(t, 9, v)
-
-	// // Can you do it again in the same interpreter?
-	// _, err = i.Eval(`import . "pkg"; func init() { *&V = 10 }`)
-	// require.NoError(t, err)
-	// assert.Equal(t, 10, v)
-
-	v = 0
-	_, err := i.Eval(`package main; import . "pkg"; func main() { dnT := &different_name.T{F:1}; *&V = dnT.F }`)
+	// Can you refer to V without a package identifier?
+	_, err := i.Eval(`import . "pkg"; func init() { V = 9 }`)
 	require.NoError(t, err)
-	assert.Equal(t, 1, v)
-
-	// // You can't just use "something_else"
-	// v = 0
-	// _, err = i.Eval(`func main() { seT := &something_else.T{F:1}; *&V = seT.F }`)
-	// assert.Error(t, err)
-
-	// // "dn" fails too -- because why wouldn't it? It's (almost?) obvious now that
-	// // I know what I'm doing wrong, sigh.
-	// v = 0
-	// _, err = i.Eval(`func main() { seT := &dn.T{F:1}; *&V = seT.F }`)
-	// assert.Error(t, err)
-
-	// // Can you make a variable of type something_else.T?
-	// v = 0
-	// _, err = i.Eval(`import something_else "github.com/got-reload/got-reload/pkg/fake/different_name"; ` +
-	// 	`func main() { seT := &something_else.T{F:1}; *&V = seT.F }`)
-	// require.NoError(t, err)
-	// assert.Equal(t, 1, v)
-
-	// // How 'bout now?
-	// v = 0
-	// _, err = i.Eval(`import se "github.com/got-reload/got-reload/pkg/fake/different_name"; ` +
-	// 	`func main() { seT := &se.T{F:1}; *&V = seT.F }`)
-	// require.NoError(t, err)
-	// assert.Equal(t, 1, v)
+	assert.Equal(t, 9, v)
 }
 
 var notExported int = 5
@@ -762,19 +364,6 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
 		// in *different* internal packages, sigh.
 	}
 
-	// No registration for a variable of an exported type.
-	{
-		_, _, _, registrations := rewriteTrim(`
-import (
-	"github.com/got-reload/got-reload/pkg/fake/other"
-)
-
-var unexportedVar = other.F()
-`)
-		// t.Logf("registrations:\n%s", registrations)
-		assert.NotContains(t, registrations, "func GRLuaddr_unexportedVar")
-	}
-
 	{
 		_, _, output, registrations := rewriteTrim(`
 func F() {
@@ -896,72 +485,6 @@ func f5(i int) S {
 		ast.Fprint(&buf, fs, targetNode, ast.NotNilFilter)
 		t.Logf("target:\n%s", buf.String())
 	}
-
-	// assert.NotContains(registrations, "T2 = T2")
-	// assert.Contains(registrations, "type GRLt_t3 = t3")
-
-	// assert.Contains(registrations, "func GRLuaddr_v1() *int { return &v1 }")
-
-	// So(registrations, ShouldContainSubstring, "var GRLfvar_f1 = f1")
-
-	// assert.Contains(registrations, "func (r *t3) GRLmaddr_t3_t3f1() *int { return &r.t3f1 }")
-
-	// Printf("%s", string(r.Info[pkg].Registrations))
-
-	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[0].Names[0].Name,
-	// 	ShouldEqual, exportPrefix+"t3f1")
-	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[1].Names[0].Name,
-	// 	ShouldEqual, "T3f2")
-	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[2].Names[0].Name,
-	// 	ShouldEqual, "T3f3")
-	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[3].Names[0].Name,
-	// 	ShouldEqual, "T3f4")
-	// So(types[exportPrefix+"t3"].(*ast.StructType).Fields.List[3].Type.(*ast.Ident).Name,
-	// 	ShouldEqual, exportPrefix+"uint32")
-	// So(types, ShouldContainKey, "T4")
-	// So(types["T4"].(*ast.StructType).Fields.List[0].Names[0].Name,
-	// 	ShouldEqual, exportPrefix+"t4f1")
-	// So(types, ShouldContainKey, exportPrefix+"t5")
-	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[0].Names[0].Name,
-	// 	ShouldEqual, exportPrefix+"t5m1")
-	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[1].
-	// 	Type.(*ast.FuncType).Params.List[0].Type.(*ast.Ident).Name,
-	// 	ShouldEqual, exportPrefix+"t3")
-	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[2].
-	// 	Type.(*ast.FuncType).Params.List[0].Type.(*ast.Ident).Name,
-	// 	ShouldEqual, exportPrefix+"t3")
-	// So(types[exportPrefix+"t5"].(*ast.InterfaceType).Methods.List[3].
-	// 	Type.(*ast.FuncType).Results.List[0].Type.(*ast.Ident).Name,
-	// 	ShouldEqual, exportPrefix+"t3")
-	// So(types, ShouldContainKey, "T6")
-	// So(types, ShouldContainKey, exportPrefix+"uint32")
-
-	// vars := getVars(file)
-	// So(vars, ShouldContainKey, exportPrefix+"v1")
-	// So(vars, ShouldContainKey, exportPrefix+"v3")
-	// So(vars[exportPrefix+"v3"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t1")
-	// So(vars, ShouldContainKey, "V4")
-	// So(vars["V4"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t1")
-	// So(vars, ShouldContainKey, exportPrefix+"v5")
-	// So(vars[exportPrefix+"v5"].(*ast.Ident).Name, ShouldEqual, "T2")
-	// So(vars, ShouldContainKey, exportPrefix+"v6")
-	// So(vars, ShouldContainKey, exportPrefix+"v8")
-	// So(vars[exportPrefix+"v8"].(*ast.Ident).Name, ShouldEqual, exportPrefix+"t3")
-	// So(vars, ShouldContainKey, "V10")
-	// So(vars["V10"].(*ast.Ident).Name, ShouldEqual,
-	// 	exportPrefix+"uint32")
-	// So(vars, ShouldContainKey, "v11")
-	// So(vars, ShouldNotContainKey, exportPrefix+"v11")
-
-	// funcs := getFuncs(file)
-	// So(funcs, ShouldContainKey, exportPrefix+"f1")
-	// So(funcs[exportPrefix+"f1"].Body.List[0], ShouldHaveSameTypeAs, &ast.ReturnStmt{})
-	// So(funcs, ShouldContainKey, setPrefix+"f1")
-	// So(funcs, ShouldContainKey, "F2")
-	// So(funcs, ShouldContainKey, setPrefix+"F2")
-	// So(funcs, ShouldContainKey, exportPrefix+"t3m1")
-	// So(funcs, ShouldContainKey, "T4m1")
-	// So(funcs, ShouldContainKey, exportPrefix+"t5m1")
 }
 
 func formatNode(t *testing.T, fset *token.FileSet, node ast.Node) string {
@@ -1182,3 +705,103 @@ func getFuncs(node ast.Node) map[string]*ast.FuncDecl {
 	ast.Inspect(node, f)
 	return funcs
 }
+
+var (
+	// Parse this and print out its AST to figure out what to generate for the
+	// rewritten functions.
+	targetFile = mustFormat(`
+package target
+
+import "sync"
+import "context"
+
+func target_func(arg ...int) int {
+	return arg[0]
+}
+
+func target_func2(arg ...int) int {
+	return GRLfvar_target_func2(arg...)
+}
+
+var GRLfvar_target_func2 func(arg ...int) int
+
+func init() {
+	GRLfvar_target_func2 = func(arg ...int) int {
+		return arg[0]
+	}
+}
+
+type T10 struct {
+	unexported_var int
+}
+
+func (r T10) unexported_method() int {
+	return GRLfvar_unexported_method()
+}
+
+type t11 struct {
+	unexported_var int
+	ExportedVar float32
+}
+
+var unexported_var int
+
+type GRLt_t11 = t11
+
+type t1 struct {
+	f1 int
+}
+
+var v3, V4 int
+
+var v5 sync.Mutex
+
+var v7 = new(float32)
+
+func F() { 
+	v3 = V4
+	V4 = v3
+	V4 = v3 + 5
+
+	var v_t1 t1
+
+	v_t1.f1 = 5
+	V4 = v_t1.f1
+
+	fmt.Printf("%v, %p, %v, %p", v3, &v3, V4, &V4)
+
+	v5.Lock()
+
+	*v7 += 0.1
+
+}
+
+type ContextAlias = context.Context
+
+func F7(ctx ContextAlias) {
+	var ctx2 ContextAlias
+	_ = ctx2
+	<-ctx.Done()
+}
+
+func F7_rewrite(ctx ContextAlias) {
+	var ctx2 ContextAlias
+	_ = ctx2
+	<-ctx.Done()
+}
+
+func example() {
+	unexported_var = 1 // test set
+	if unexported_var == 0 { // test get
+	}
+
+
+	var v T10
+	dummy := v.unexported_var
+
+	v.unexported_var = 1
+
+	if v.unexported_var == 0 {}
+}
+`)
+)
