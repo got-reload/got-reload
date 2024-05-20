@@ -9,12 +9,12 @@ package reloader
 import (
 	"context"
 	"fmt"
-	"go/ast"
 	lpkg "log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -174,12 +174,13 @@ func StartWatching(list []string) (<-chan string, chan struct{}, *gotreload.Rewr
 				if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) > 0 {
 					abs, _ := filepath.Abs(event.Name)
 					rMux.Lock()
-					if _, _, err := r.LookupFile(abs); err == nil {
+					file := r.LookupFile(abs)
+					rMux.Unlock()
+					if file != nil {
 						changedCh <- abs
 					} else {
 						// log.Printf("An unknown file changed: %s", abs)
 					}
-					rMux.Unlock()
 				} else {
 					// log.Printf("Unknown event: %v", event)
 				}
@@ -272,6 +273,7 @@ func processChanges(r *gotreload.Rewriter, changed map[string]bool) error {
 			log.Fatalf("Error parsing package containing file %s: %v", updated, err)
 		}
 
+		log.Printf("Refiltering package containing %s", updated)
 		// Rewrite the package in "reload" mode
 		err = newR.Rewrite(gotreload.ModeRewrite, false)
 		if err != nil {
@@ -305,7 +307,7 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 	// Look at all stubbed functions, and build a map of only those in files that
 	// changed.
 	allStubVars := newR.NewFunc[newR.Pkgs[0].PkgPath]
-	possiblyChangedStubVars := map[string]*ast.FuncLit{}
+	var possiblyChangedStubVars []string
 	seen := map[string]bool{}
 	for stubVar, funcLit := range allStubVars {
 		name := newPkg.Fset.Position(funcLit.Pos()).Filename
@@ -313,18 +315,21 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 			continue
 		}
 		seen[name] = true
-		possiblyChangedStubVars[stubVar] = funcLit
+		possiblyChangedStubVars = append(possiblyChangedStubVars, stubVar)
 		// log.Printf("Might've changed: %s", stubVar)
 	}
 	// Delete all seen files from the map of changed files.
 	for name := range seen {
 		delete(changed, name)
 	}
+	sort.Strings(possiblyChangedStubVars)
 
 	updatedFound := false
 	// Look at all the functions that might've changed, because of being in one
 	// of the files that changed.
-	for stubVar, funcLit := range possiblyChangedStubVars {
+	for _, stubVar := range possiblyChangedStubVars {
+		funcLit := allStubVars[stubVar]
+
 		// log.Printf("Looking at %s: %s", pkgPath, stubVar)
 
 		// Get a string version of the old function definition
@@ -334,9 +339,7 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 			continue
 		}
 		// Get a string version of the new function definition
-		//
-		// TODO: Use the funcLit that we already have from above.
-		newDefStr, err := newR.FuncDef(pkgPath, stubVar)
+		newDefStr, _, err := gotreload.FormatNode(newPkg.Fset, funcLit)
 		if err != nil {
 			log.Printf("Error getting new function definition of %s:%s: %v", pkgPath, stubVar, err)
 			continue
@@ -351,42 +354,40 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 		log.Printf("%s is new", stubVar)
 
 		// Get the named imports (if any) from the changed file
-		changedFile := gotreload.FindFile(newPkg, funcLit.Pos())
-		namedImportsList := []string{}
+		changedFile := gotreload.FileFromPos(newPkg, funcLit)
+		importsList := []string{
+			fmt.Sprintf(". %q", newR.Pkgs[0].PkgPath),
+		}
 		for _, imp := range changedFile.Imports {
-			if imp.Name == nil || imp.Name.Name == "" {
-				continue
-			}
+			impName := newPkg.TypesInfo.PkgNameOf(imp).Name()
+
 			// Note that imp.Path.Value includes the surrounding
 			// double-quotes of the import.
-			namedImportsList = append(namedImportsList,
-				fmt.Sprintf("%s %s", imp.Name.Name, imp.Path.Value))
+			importsList = append(importsList,
+				fmt.Sprintf("%s %s", impName, imp.Path.Value))
 		}
-		var namedImports string
-		if len(namedImportsList) > 0 {
-			namedImports = strings.Join(namedImportsList, "\n")
-			log.Printf("Named imports:\n%s", namedImports)
-			namedImports = fmt.Sprintf("import (\n%s\n)", namedImports)
-		}
+		imports := strings.Join(importsList, "\n")
+		// log.Printf("Imports:\n%s", imports)
 
 		mainFunc := fmt.Sprintf(`package main
-%s
-import . %q
+import (
+	%s
+)
 func main() {
 	%s = %s
-}`, namedImports, newR.Pkgs[0].PkgPath, stubVar, newDefStr)
+}`, imports, stubVar, newDefStr)
 
 		// Run "goimports" on the generated main() function.
 		//
 		// TODO: Could probably adapt astutil.UsesImport for this.
 		updatedFilename := newPkg.Fset.Position(changedFile.Pos()).Filename
-		byts, err := goimports.Process(updatedFilename, []byte(mainFunc), nil)
+		mfBytes, err := goimports.Process(updatedFilename, []byte(mainFunc), nil)
 		if err != nil {
 			log.Printf("failed to 'goimports' source for %s: %v", stubVar, err)
 			log.Printf("Main func: %s", mainFunc)
 			continue
 		}
-		mainFunc = string(byts)
+		mainFunc = string(mfBytes)
 
 		// log.Printf("Main:\n%s", mainFunc)
 

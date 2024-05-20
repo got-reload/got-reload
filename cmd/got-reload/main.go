@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"go/format"
 	"log"
 	"os"
 	"os/exec"
@@ -336,13 +335,12 @@ func filter(selfName string, args []string) {
 					log.Fatalf("Error creating %s: %v", newDir, err)
 				}
 			}
-			b := &bytes.Buffer{}
-			err = format.Node(b, pkg.Fset, file)
+			_, b, err := gotreload.FormatNode(pkg.Fset, file)
 			if err != nil {
 				log.Fatalf("Error formatting filtered version of %s: %v", outputFileName, err)
 			}
 			outputFilePath := filepath.Join(newDir, filepath.Base(outputFileName))
-			err = os.WriteFile(outputFilePath, b.Bytes(), 0644)
+			err = os.WriteFile(outputFilePath, b, 0644)
 			if err != nil {
 				log.Fatalf("Error writing filtered version of %s to %s: %v", outputFileName, outputFilePath, err)
 			}

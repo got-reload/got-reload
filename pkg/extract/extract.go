@@ -65,9 +65,9 @@ func init() {
 		{{- end}}
 
 		{{if .NeedsPublicType -}}
-		// type aliases to export unexported or internal types
-		{{range $unexportedName, $exportedName := .NeedsPublicType -}}
-		"{{$exportedName}}": reflect.ValueOf((*{{$unexportedName}})(nil)),
+		// type aliases for internal types
+		{{range $not_used, $rec := .NeedsPublicType -}}
+		"{{$rec.Name}}": reflect.ValueOf((*{{$rec.Name}})(nil)),
 		{{end}}
 		{{- end}}
 
@@ -104,8 +104,8 @@ func init() {
 
 {{- if .NeedsPublicType }}
 // Type aliases
-{{range $unexportedName, $exportedName := .NeedsPublicType -}}
-type {{$exportedName}} = {{$unexportedName}}
+{{range $unexportedName, $rec := .NeedsPublicType -}}
+type {{$rec.Name}} = {{$rec.Pkg}}.{{$unexportedName}}
 {{end}}
 {{end}}
 `
@@ -139,6 +139,11 @@ type FieldAccessor struct {
 	FieldType string // name of type of field
 }
 
+type PublicType struct {
+	Pkg  string
+	Name string
+}
+
 // restricted map defines symbols for which a special implementation is provided.
 var restricted = map[string]bool{
 	"osExit":        true,
@@ -165,7 +170,7 @@ func GenContent(
 	destPkg, importPath string,
 	p *types.Package,
 	setFuncs map[string]bool,
-	needsPublicType map[string]string,
+	needsPublicType map[string]PublicType,
 	imports *ImportTracker,
 ) ([]byte, error) {
 	prefix := "_" + importPath + "_"
@@ -427,13 +432,9 @@ func (it *ImportTracker) GetAlias(name, path string) (retS string) {
 		return ""
 	}
 	if alias, ok := it.alias[path]; ok {
-		if alias == "" {
-			return name
-		}
 		return alias
 	}
 
-	// New package. Have we seen this pkg name already?
 	if it.usedName[name] {
 		alias := fmt.Sprintf("%s_%d", name, it.seq)
 		it.seq++
@@ -441,8 +442,9 @@ func (it *ImportTracker) GetAlias(name, path string) (retS string) {
 		it.alias[path] = alias
 		return alias
 	}
+
 	it.usedName[name] = true
-	it.alias[path] = ""
+	it.alias[path] = name
 	return name
 }
 

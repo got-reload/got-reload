@@ -106,10 +106,8 @@ func TestCompileParse(t *testing.T) {
 			registrations = string(r.Info[pkg].Registrations)
 		}
 
-		b := &bytes.Buffer{}
-		err = format.Node(b, pkg.Fset, file)
+		output, _, err := FormatNode(pkg.Fset, file)
 		require.NoError(t, err)
-		output := b.String()
 		// t.Logf("output:\n%s", output)
 
 		return r, pkg, output, registrations
@@ -122,6 +120,7 @@ func TestCompileParse(t *testing.T) {
 		return r, pkg, output, registrations
 	}
 
+	// Export a type
 	{
 		_, _, output, _ := rewriteTrim("type t1 int")
 		// t.Logf("output:\n%s", output)
@@ -149,7 +148,7 @@ func TestCompileParse(t *testing.T) {
 	funcEquals := func(r *Rewriter, stubVar, expectedFuncValue string) {
 		t.Helper()
 		pkg := r.Pkgs[0]
-		output := formatNode(t, pkg.Fset, r.NewFunc[pkg.PkgPath][stubVar])
+		output := formatTestNode(t, pkg.Fset, r.NewFunc[pkg.PkgPath][stubVar])
 		assert.Equal(t, expectedFuncValue, output)
 	}
 
@@ -271,8 +270,10 @@ func F9(_ int, b float32, _ string) float32 { return b }
 		funcEquals(r, "GRLfvar_F9", "func(_ int, b float32, _ string) float32 { return b }")
 	}
 
+	// Test where pkg dup imports and uses another package also named dup, and
+	// the generated registrations refer to the 2nd one as "dup_0".
 	{
-		_, pkg, _, registrations := rewriteTrim(`
+		_, pkg, _, _ := rewrite(`
 import (
 	"github.com/got-reload/got-reload/pkg/fake/dup1/dup"
 )
@@ -285,7 +286,7 @@ var X dup.I
 			nil, nil, extract.NewImportTracker(pkg.Name, pkg.PkgPath))
 		require.NoError(t, err)
 		// t.Logf("dup registrations:\n%s", byt)
-		registrations = filterWhitespace(byt)
+		registrations := filterWhitespace(byt)
 		assert.Contains(t, registrations, `"I": reflect.ValueOf((*dup.I)(nil)),`)
 		assert.Contains(t, registrations, `WF func() dup_0.SomeType`)
 	}
@@ -307,27 +308,37 @@ type s struct {
 		assert.Contains(t, output, "type GRLx_s struct { GRLx_f1 fake.T }")
 	}
 
+	// If you have a method that returns a type from an internal package (aka an
+	// "internal type"), and you want to be able to reload it (remember that
+	// reloaded code runs in a stand-alone "package main"), then the internal
+	// type needs to have an external alias that the reloaded code can safely
+	// reference.
+	//
+	// So test that "internal.T_thisIsInternal" is aliased and referred to as
+	// "GRLt_internal_T_thisIsInternal" in the reloaded function.
 	{
 		_, _, output, registrations := rewriteTrim(`
 import (
-	"github.com/got-reload/got-reload/pkg/fake/internal"
+	internal_name "github.com/got-reload/got-reload/pkg/fake/internal"
 	"sync/atomic"
 )
 
 type T2 struct {
-	f internal.T_thisIsInternal
+	f internal_name.T_thisIsInternal
 }
 
-func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f }
+func (t *T2) F(b atomic.Bool) internal_name.T_thisIsInternal { return t.f }
 `)
 		// t.Logf("registrations:\n%s", registrations)
+		assert.Contains(t, registrations, `internal_name "github.com/got-reload/got-reload/pkg/fake/internal"`)
 		assert.Contains(t, registrations, `"GRLfvar_T2_F": reflect.ValueOf(&GRLfvar_T2_F).Elem()`)
+		assert.Contains(t, registrations, "type GRLt_internal_T_thisIsInternal = internal_name.T_thisIsInternal")
 
 		// t.Logf("output:\n%s", output)
-		assert.Contains(t, output, "type T2 struct { GRLx_f internal.T_thisIsInternal }")
-		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return GRLfvar_T2_F(t, b) }")
-		assert.Contains(t, output, "var GRLfvar_T2_F func(t *T2, b atomic.Bool) internal.T_thisIsInternal")
-		assert.Contains(t, output, "func init() { GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal.T_thisIsInternal { return t.GRLx_f } }")
+		assert.Contains(t, output, "type T2 struct { GRLx_f internal_name.T_thisIsInternal }")
+		assert.Contains(t, output, "func (t *T2) F(b atomic.Bool) internal_name.T_thisIsInternal { return GRLfvar_T2_F(t, b) }")
+		assert.Contains(t, output, "var GRLfvar_T2_F func(t *T2, b atomic.Bool) internal_name.T_thisIsInternal")
+		assert.Contains(t, output, "func init() { GRLfvar_T2_F = func(t *T2, b atomic.Bool) internal_name.T_thisIsInternal { return t.GRLx_f } }")
 
 		// Change T2.F and reload
 		//
@@ -335,17 +346,19 @@ func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f }
 		// refactored.
 		newR := NewRewriter()
 		newR.Config.Overlay = map[string][]byte{
+			// The import and the type definition should be the same as before,
+			// only the function should change.
 			path + "/t1.go": []byte(`package fake
 import (
-	"github.com/got-reload/got-reload/pkg/fake/internal"
+	internal_name "github.com/got-reload/got-reload/pkg/fake/internal"
 	"sync/atomic"
 )
 
 type T2 struct {
-	f internal.T_thisIsInternal
+	f internal_name.T_thisIsInternal
 }
 
-func (t *T2) F(b atomic.Bool) internal.T_thisIsInternal { return t.f + 1 }
+func (t *T2) F(b atomic.Bool) internal_name.T_thisIsInternal { return t.f + 1 }
 `),
 			path + "/t2.go": []byte("package fake"),
 		}
@@ -487,16 +500,15 @@ func f5(i int) S {
 	}
 }
 
-func formatNode(t *testing.T, fset *token.FileSet, node ast.Node) string {
+func formatTestNode(t *testing.T, fset *token.FileSet, node ast.Node) string {
 	if node == nil || node == (*ast.FuncLit)(nil) {
 		return ""
 	}
 
 	t.Helper()
-	b := &bytes.Buffer{}
-	err := format.Node(b, fset, node)
+	s, _, err := FormatNode(fset, node)
 	require.NoError(t, err)
-	return filterWhitespace(b.String())
+	return filterWhitespace(s)
 }
 
 // Needs *a lot* of updating.
@@ -640,72 +652,6 @@ func TestReloadParse(t *testing.T) {
 	// Verify the new function runs when called
 }
 
-// FIXME: This should look at top-level types only
-func getTypes(node ast.Node) map[string]ast.Expr {
-	types := map[string]ast.Expr{}
-
-	f := func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.TypeSpec:
-			types[n.Name.Name] = n.Type
-		}
-
-		return true
-	}
-
-	ast.Inspect(node, f)
-	return types
-}
-
-func getVars(node ast.Node) map[string]ast.Expr {
-	vars := map[string]ast.Expr{}
-
-	depth := 0
-	f := func(n ast.Node) bool {
-		if n == nil {
-			depth--
-			return true
-		}
-
-		depth++
-		switch n := n.(type) {
-		case *ast.ValueSpec:
-			for _, ident := range n.Names {
-				// fmt.Printf("%s, %d\n", ident.Name, depth)
-				vars[ident.Name] = n.Type
-			}
-		}
-
-		return true
-	}
-
-	ast.Inspect(node, f)
-	return vars
-}
-
-func getFuncs(node ast.Node) map[string]*ast.FuncDecl {
-	funcs := map[string]*ast.FuncDecl{}
-
-	depth := 0
-	f := func(n ast.Node) bool {
-		if n == nil {
-			depth--
-			return true
-		}
-
-		depth++
-		switch n := n.(type) {
-		case *ast.FuncDecl:
-			funcs[n.Name.Name] = n
-		}
-
-		return true
-	}
-
-	ast.Inspect(node, f)
-	return funcs
-}
-
 var (
 	// Parse this and print out its AST to figure out what to generate for the
 	// rewritten functions.
@@ -714,6 +660,7 @@ package target
 
 import "sync"
 import "context"
+import "math"
 
 func target_func(arg ...int) int {
 	return arg[0]
@@ -773,6 +720,12 @@ func F() {
 	v5.Lock()
 
 	*v7 += 0.1
+
+	v3 = 1
+	*&v3 = 1
+	var f float64
+	_ = math.Sin(f)
+	_ = math.Sin(*&f)
 
 }
 
