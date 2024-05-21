@@ -401,11 +401,12 @@ func main() {
 			return err
 		}
 
+		var r any
 		panicked := false
 		// Catch Yaegi panics
 		func() {
 			defer func() {
-				if r := recover(); r != nil {
+				if r = recover(); r != nil {
 					err = fmt.Errorf("Eval panicked: %v", r)
 					panicked = true
 				}
@@ -416,6 +417,12 @@ func main() {
 
 		if panicked {
 			log.Printf("ERROR: Interpreter panicked: %v", err)
+			errStr := fmt.Sprintf("%v", r)
+			var line int
+			_, err := fmt.Sscanf(errStr, "%d:", &line)
+			if err == nil && line-1 >= 0 {
+				log.Printf("%d: %s", line, strings.Split(mainFunc, "\n")[line-1])
+			}
 			continue
 		}
 

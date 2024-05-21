@@ -149,13 +149,16 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, createRegistration bool) er
 	// Find everything in this package that's at package scope and not exported,
 	// and export it, in-place, by adding a GRLx_ prefix.
 	for ident, obj := range pkg.TypesInfo.Defs {
-		_, isFunc := obj.(*types.Func)
+		objFunc, isFunc := obj.(*types.Func)
 		if ident.IsExported() ||
 			ident.Name == "_" ||
 			obj == nil ||
 			obj.Pkg() != pkg.Types ||
 			(obj.Parent() != nil && obj.Parent() != pkg.Types.Scope()) ||
-			(isFunc && ident.Name == "init") {
+			// Skip init() functions
+			(isFunc && ident.Name == "init" &&
+				// but not methods that happen to be named "init".
+				objFunc.Type().(*types.Signature).Recv() == nil) {
 
 			continue
 		}

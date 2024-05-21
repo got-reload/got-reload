@@ -26,8 +26,8 @@ const cmdPath = "github.com/got-reload/got-reload/cmd/got-reload"
 var findWhitespace = regexp.MustCompile(`[ \n\t]+`)
 
 // Change all multiple space runs with a single space
-func filterWhitespace[T []byte | string](w T) string {
-	switch thing := interface{}(w).(type) {
+func filterWhitespace(w any) string {
+	switch thing := w.(type) {
 	case string:
 		return findWhitespace.ReplaceAllLiteralString(thing, " ")
 	case []byte:
@@ -466,12 +466,19 @@ func f5(i int) S {
 		// t.Logf("newR.NewFunc: %#v", newR.NewFunc)
 	}
 
-	// Make sure we don't rewrite init() functions.
+	// Make sure we don't rewrite init() functions, but do rewrite init()
+	// *methods*.
 	{
-		_, _, output, _ := rewriteTrim(`func init() { panic("") }`)
+		_, _, output, _ := rewriteTrim(`
+func init() { panic("") }
+type T int
+func (r *T) init() {}
+`)
 		// t.Logf("registrations:\n%s", registrations)
 		assert.NotContains(t, output, "func GRLx_init")
 		assert.Contains(t, output, "func init()")
+
+		assert.Contains(t, output, "func (r *T) GRLx_init")
 	}
 
 	{
