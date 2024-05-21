@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/token"
 	"go/types"
-	"io/ioutil"
 	"log"
-	"path"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/got-reload/got-reload/pkg/extract"
+	"github.com/got-reload/got-reload/pkg/util"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 )
@@ -21,22 +22,24 @@ import (
 const (
 	thisPackageName = "gotreload" // Should probably use reflection for this.
 
-	// Used to mark variables, fields, etc as exported.
-	exportPrefix = "GRL_"
+	exportPrefix = "GRLx_"
+
 	// Used to generate argument names.
 	syntheticArgPrefix = "GRLarg_"
+	syntheticReceiver  = "GRLrecvr"
 	// Used for stub function variable names.
-	stubPrefix = "GRLf_"
-	// Used for set functions.
-	setPrefix = "GRLset_"
+	stubPrefix  = "GRLfvar_"
+	utypePrefix = "GRLt_"
 )
 
 type (
 	Rewriter struct {
-		Config packages.Config
-		Pkgs   []*packages.Package
-		// Keys are PkgPath & setter name.  We use PkgPath as the key instead of
-		// a *packages.Package because we need to be able to find this across
+		OutputDir string
+		Pwd       string
+		Config    packages.Config
+		Pkgs      []*packages.Package
+		// Keys are PkgPath & stubVar name.  We use PkgPath as the key instead
+		// of a *packages.Package because we need to be able to find this across
 		// different instances of Rewriter, where pointer values will be
 		// different, but package import paths, which are just strings, will be
 		// the same.
@@ -44,6 +47,9 @@ type (
 
 		// Per-package supplemental information.  Used only in initial rewrite.
 		Info map[*packages.Package]*Info
+
+		// unexported name => pkg name & exported name
+		needsPublicType map[string]extract.PublicType
 	}
 
 	Info struct {
@@ -51,37 +57,66 @@ type (
 	}
 )
 
-func (r *Rewriter) Load(paths ...string) error {
-	// Make sure the mode has at least what the parser needs
-	r.Config.Mode |= packages.NeedName |
-		packages.NeedFiles |
-		packages.NeedCompiledGoFiles |
-		packages.NeedImports |
-		packages.NeedDeps |
-		packages.NeedTypes |
-		packages.NeedSyntax |
-		packages.NeedTypesInfo
-	r.NewFunc = map[string]map[string]*ast.FuncLit{}
-	r.Info = map[*packages.Package]*Info{}
+func NewRewriter() *Rewriter {
+	r := Rewriter{
+		// Make sure the mode has at least what the parser needs
+		Config: packages.Config{
+			Fset: token.NewFileSet(),
+			Mode: packages.NeedName |
+				packages.NeedFiles |
+				packages.NeedCompiledGoFiles |
+				packages.NeedImports |
+				packages.NeedDeps |
+				packages.NeedTypes |
+				packages.NeedSyntax |
+				packages.NeedTypesInfo,
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
+			},
+		},
+		NewFunc: map[string]map[string]*ast.FuncLit{},
+		Info:    map[*packages.Package]*Info{},
+	}
 
+	return &r
+}
+
+func (r *Rewriter) Load(paths ...string) error {
 	pkgs, err := packages.Load(&r.Config, paths...)
 	if err != nil {
 		return err
 	}
+	packages.PrintErrors(pkgs)
 	r.Pkgs = pkgs
 
 	return nil
 }
 
-// Rewrite rewrites the ASTs in r.Pkgs in place.  addPackage==true is used in
-// reload mode, to add package prefixes to all mentioned variables.
-func (r *Rewriter) Rewrite(addPackage bool) error {
+type RewriteMode int
+
+const (
+	ModeInvalid RewriteMode = iota
+	ModeRewrite
+	ModeReload
+)
+
+// Rewrite rewrites the ASTs in r.Pkgs in place.  mode==ModeReload is used to
+// add package prefixes to all mentioned variables, and make other changes.
+func (r *Rewriter) Rewrite(mode RewriteMode, genContent bool) error {
 	for _, pkg := range r.Pkgs {
 		if pkg.TypesInfo == nil {
 			log.Printf("Pkg %s: No TypesInfo\n", pkg.Name)
 			continue
 		}
-		err := r.rewritePkg(pkg, addPackage)
+		var err error
+		switch mode {
+		case ModeRewrite:
+			err = r.rewritePkg(pkg, genContent)
+		case ModeReload:
+			err = r.reloadPkg(pkg)
+		default:
+			panic(fmt.Sprintf("Internal error: unknown rewrite mode: %v", mode))
+		}
 		if err != nil {
 			return err
 		}
@@ -89,92 +124,162 @@ func (r *Rewriter) Rewrite(addPackage bool) error {
 	return nil
 }
 
-func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
+// rewritePkg rewrites the syntax tree for all source files for a package we're
+// filtering, and optionally generates and writes a "registration" file for said
+// package.
+func (r *Rewriter) rewritePkg(pkg *packages.Package, createRegistration bool) error {
 	if pkg.Name == "main" {
 		return fmt.Errorf("Cannot rewrite package \"main\"")
 	}
+	if pkg.Name == "" {
+		return fmt.Errorf("Missing package name: %s %s", pkg.ID, pkg.PkgPath)
+	}
+	// log.Printf("Pkg: %#v", pkg)
 
-	exported := map[types.Object]bool{}
-	definedInThisPackage := map[types.Object]bool{}
+	r.needsPublicType = map[string]extract.PublicType{}
 	funcs := map[*ast.FuncDecl]string{}
+	stubVars := map[string]bool{}
+	imports := extract.NewImportTracker(pkg.Name, pkg.PkgPath)
+
+	type exportRec struct {
+		orig string // not actually used atm but may come in handy later
+		new  string
+	}
+	exported := map[types.Object]exportRec{}
+	// Find everything in this package that's at package scope and not exported,
+	// and export it, in-place, by adding a GRLx_ prefix.
+	for ident, obj := range pkg.TypesInfo.Defs {
+		objFunc, isFunc := obj.(*types.Func)
+		if ident.IsExported() ||
+			ident.Name == "_" ||
+			obj == nil ||
+			obj.Pkg() != pkg.Types ||
+			(obj.Parent() != nil && obj.Parent() != pkg.Types.Scope()) ||
+			// Skip init() functions
+			(isFunc && ident.Name == "init" &&
+				// but not methods that happen to be named "init".
+				objFunc.Type().(*types.Signature).Recv() == nil) {
+
+			continue
+		}
+		// Skip generic functions and methods.
+		if s, ok := obj.Type().(*types.Signature); ok && (s.TypeParams().Len() > 0 || s.RecvTypeParams().Len() > 0) {
+			continue
+		}
+		exported[obj] = exportRec{
+			orig: ident.Name,
+			new:  exportPrefix + ident.Name,
+		}
+		ident.Name = exported[obj].new
+	}
+
+	for ident, obj := range pkg.TypesInfo.Uses {
+		// Find everything that references any of the above exported objects, and
+		// reset their names.
+		if rec, ok := exported[obj]; ok {
+			ident.Name = rec.new
+		}
+
+		// Note "internal" types that need non-internal type aliases.
+		switch obj := obj.(type) {
+		case *types.TypeName:
+			if objPkg := obj.Pkg(); objPkg != nil && util.InternalPkg(objPkg.Path()) {
+				// FIXME: Does not take into account types with the same name in
+				// different internal packages.
+
+				// Note that ident.Name will not be exported (at least, not by us;
+				// that is, will not have a GRLx_ prefix), since it's in a different
+				// package.
+
+				file := FileFromPos(pkg, ident)
+				// log.Printf("Rewrite TypeName: %[1]v/%#[1]v, file: %v", obj, file)
+				if file != nil {
+					for _, imp := range file.Imports {
+						// The import path in an *ast.ImportSpec has double-quotes
+						// around it. Strip them.
+						impPath := imp.Path.Value
+						impPath = impPath[1 : len(impPath)-1]
+
+						if impPath == objPkg.Path() {
+							pkgName := objPkg.Name()
+							if imp.Name != nil {
+								pkgName = imp.Name.Name
+							}
+							// This seems like it could go wrong in some weird way. I'm
+							// iterating over all objects in the package, which could
+							// have the same package imported with different names
+							// between files in the package. This will standardize
+							// those package names (if that's the right word), but
+							// maybe it shouldn't.
+							pkgName = imports.GetAlias(pkgName, impPath)
+
+							public := utypePrefix + "internal_" + ident.Name
+							// log.Printf("Rewrite: %s.%s => %s", pkgName, ident.Name, public)
+							r.needsPublicType[ident.Name] = extract.PublicType{
+								Pkg:  pkgName,
+								Name: public,
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
 	for ident, obj := range pkg.TypesInfo.Defs {
 		if ident.Name == "_" || obj == nil {
 			continue
 		}
+		// log.Printf("Rewrite: Def: %p: %#v, Obj: %p: %#v, Parent: %#v", ident, ident, obj, obj, obj.Parent())
+
 		// Look at struct fields and methods in interfaces.
 		if obj.Parent() == nil {
-			switch obj := obj.(type) {
-			// Struct field names
-			case *types.Var:
-				if obj.IsField() {
-					assureExported(exported, ident, obj)
-				}
-			// Method names in interfaces.
-			case *types.Func:
-				assureExported(exported, ident, obj)
+			// Method names in interfaces. Might be wrong and/or simpler to do
+			// with Defs as for struct types, above.
+			if obj, ok := obj.(*types.Func); ok {
 				tagForTranslation(pkg, funcs, obj)
-			default:
-				return fmt.Errorf("Internal error: No parent: %#v\n", obj)
 			}
 			continue
 		}
+
 		if obj.Parent() != pkg.Types.Scope() {
 			// Skip any item (variable, type, etc) not at package scope.
 			continue
 		}
-		assureExported(exported, ident, obj)
+
 		if obj, ok := obj.(*types.Func); ok {
 			tagForTranslation(pkg, funcs, obj)
 		}
-		definedInThisPackage[obj] = true
 	}
 
-	r.stubTopLevelFuncs(pkg, funcs)
+	r.stubTopLevelFuncs(pkg, funcs, ModeRewrite)
 
-	// Find all the uses of all the stuff we exported, and export them
-	// too.  If addPackage, tag idents defined in this package for adding the
-	// package to.
-	addPackageIdent := map[*ast.Ident]bool{}
-	for ident, obj := range pkg.TypesInfo.Uses {
-		if exported[obj] {
-			ident.Name = exportPrefix + ident.Name
-		}
-		if addPackage && definedInThisPackage[obj] {
-			// log.Printf("Add package to %s", ident.Name)
-			addPackageIdent[ident] = true
-		}
+	// Generate symbol registrations
+	// log.Printf("Looking for stubVars for pkg %s", pkg.PkgPath)
+	for stubVar := range r.NewFunc[pkg.PkgPath] {
+		// log.Printf("stubVar: %s", stubVar)
+		stubVars[stubVar] = true
 	}
 
-	if addPackage {
-		// Add a package prefix to all identifiers defined in this package
-		// (noted above), aka "reload mode".
-		for _, file := range pkg.Syntax {
-			pre := func(c *astutil.Cursor) bool {
-				switch n := c.Node().(type) {
-				case *ast.Ident:
-					if !addPackageIdent[n] {
-						return true
-					}
-					// log.Printf("Adding package to %s", n.Name)
-					c.Replace(newSelector(pkg.Name, n.Name))
-				}
-				return true
-			}
-			file = astutil.Apply(file, pre, nil).(*ast.File)
-		}
-	} else {
-		// Generate symbol registrations, aka "rewrite mode".
-		var setters []string
-		for setter := range r.NewFunc[pkg.PkgPath] {
-			setters = append(setters, setter)
-		}
-		registrationSource, err := extract.GenContent(pkg.Name, pkg.PkgPath, false, pkg.Types, setters, exported)
+	if createRegistration {
+		// Create "registrations" for this package.
+
+		// Get newDir from the first file in the package
+		outputFileName := strings.TrimPrefix(pkg.Fset.Position(pkg.Syntax[0].Pos()).Filename, r.Pwd+"/")
+		newDir := filepath.Join(r.OutputDir, filepath.Dir(outputFileName))
+
+		registrationSource, err := extract.GenContent(newDir+"/grl_unknown.go",
+			pkg.Name, pkg.PkgPath, pkg.Types,
+			stubVars, r.needsPublicType, imports)
 		if err != nil {
-			return fmt.Errorf("Failed generating symbol registration for %s at %s: %w", pkg.Name, pkg.PkgPath, err)
+			return fmt.Errorf("Failed generating symbol registration for %q at %s: %w", pkg.Name, pkg.PkgPath, err)
 		}
 
-		// log.Printf("generated grl_register.go: %s", string(registrationSource))
-		r.Info[pkg] = &Info{Registrations: registrationSource}
+		if registrationSource != nil {
+			// log.Printf("generated grl_register.go: %s", string(registrationSource))
+			r.Info[pkg] = &Info{Registrations: registrationSource}
+		}
 	}
 
 	// b := bytes.Buffer{}
@@ -186,79 +291,130 @@ func (r *Rewriter) rewritePkg(pkg *packages.Package, addPackage bool) error {
 	return nil
 }
 
-// assureExported takes unexported identifiers, adds a prefix to export them,
-// and marks the associated object for later use.
-func assureExported(exported map[types.Object]bool, ident *ast.Ident, obj types.Object) {
-	if obj.Exported() {
-		return
+// reloadPkg rewrites the syntax tree for all source files for a package
+// we're filtering, for "reload" mode. It doesn't do a lot, just rewrites
+// internal package names (which can't be referenced by a stand-alone "main"
+// package) to use their external aliases.
+func (r *Rewriter) reloadPkg(pkg *packages.Package) error {
+	if pkg.Name == "main" {
+		return fmt.Errorf("Cannot rewrite package \"main\"")
 	}
-	ident.Name = exportPrefix + ident.Name
-	exported[obj] = true
+	if pkg.Name == "" {
+		return fmt.Errorf("Missing package name: %s %s", pkg.ID, pkg.PkgPath)
+	}
+	// log.Printf("Pkg: %#v", pkg)
+
+	for _, file := range pkg.Syntax {
+		replace := map[ast.Node]ast.Node{}
+		pre := func(c *astutil.Cursor) bool {
+			// log.Printf("reload: I see: Obj: %#v", c.Node())
+			switch n := c.Node().(type) {
+			case *ast.Ident:
+				if publicType, ok := r.needsPublicType[n.Name]; ok {
+					// log.Printf("found an ident resembling one that needs a public type: %[1]v/%#[1]v; parent: %[2]v/%#[2]v",
+					// 	n, c.Parent())
+					switch p := c.Parent().(type) {
+					case *ast.ValueSpec:
+						// log.Printf("Setting public type: %s to %s.%s", n.Name, pkg.Name, publicType)
+						c.Replace(&ast.Ident{Name: publicType.Name})
+					case *ast.SelectorExpr:
+						// If the selector's X matches the pubic type's package, then
+						// replace the whole selector expression (x.y) with just the
+						// name of the public (non-internal) type.
+						if pIdent, ok := p.X.(*ast.Ident); ok &&
+							pIdent.Name == publicType.Pkg {
+
+							// log.Printf("reload: publictype: I see: Obj: %#v, parent: %#v", c.Node(), p)
+							replace[p] = &ast.Ident{Name: publicType.Name}
+						}
+					}
+				}
+			}
+			return true
+		}
+		post := func(c *astutil.Cursor) bool {
+			if r, ok := replace[c.Node()]; ok {
+				c.Replace(r)
+				delete(replace, c.Node())
+			}
+			return true
+		}
+		file = astutil.Apply(file, pre, post).(*ast.File)
+		if len(replace) > 0 {
+			panic(fmt.Sprintf("Internal error: replace map should be used up & empty, but it has %d values in it: %v",
+				len(replace), replace))
+		}
+	}
+	return nil
 }
 
 // tagForTranslation finds the function/method declaration obj is in, and tags
 // it for translation.
 func tagForTranslation(pkg *packages.Package, funcs map[*ast.FuncDecl]string, obj *types.Func) {
 	// log.Printf("Func: %#v\n", obj)
-	for _, file := range pkg.Syntax {
-		filename := pkg.Fset.Position(file.Pos()).Filename
-		objFileName := pkg.Fset.Position(obj.Pos()).Filename
-		// log.Printf("Looking at %q vs. %q", filename, objFileName)
-		if filename == objFileName {
-			path, exact := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
-			// log.Printf("func %s: exact: %v, %#v\n", obj.Name(), exact, path)
+	file := FileFromPos(pkg, obj)
+	if file == nil {
+		log.Printf("Warning: Cannot find file for %s\n", obj.Name())
+		return
+	}
 
-			if path != nil && exact {
-				var funcDecl *ast.FuncDecl
-				var ok bool
-				for _, item := range path {
-					funcDecl, ok = item.(*ast.FuncDecl)
-					if ok {
-						// log.Printf("func %s: marking for translation\n", obj.Name())
-						funcs[funcDecl] = obj.Name()
-						// log.Printf("Tagging %s for translation", obj.Name())
-						return
-					}
-				}
-				log.Printf("Cannot find FuncDecl for %s\n", obj.Name())
-			} else {
-				log.Printf("Cannot find exact path for %s\n", obj.Name())
-			}
+	astNodePath, exact := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
+	// log.Printf("func %s: exact: %v, %#v\n", obj.Name(), exact, path)
+
+	if astNodePath == nil || !exact {
+		log.Printf("Warning: Cannot find exact path for %s\n", obj.Name())
+		return
+	}
+
+	var funcDecl *ast.FuncDecl
+	var ok bool
+	for _, node := range astNodePath {
+		// position := pkg.Fset.Position(item.Pos())
+		funcDecl, ok = node.(*ast.FuncDecl)
+		if ok {
+			// log.Printf("func %s: marking for translation\n", obj.Name())
+			funcs[funcDecl] = obj.Name()
+			// log.Printf("Tagging %s for translation", obj.Name())
+			// log.Printf("Found FuncDecl for %s: %s, %d:%d\n",
+			// 	obj.Name(), filename, position.Line, position.Column)
 			return
 		}
+		// log.Printf("Did not find FuncDecl for %s: %s, %d:%d\n",
+		// 	obj.Name(), filename, position.Line, position.Column)
 	}
-	log.Printf("Cannot find file for %s\n", obj.Name())
+	// Not (necessarily) a fatal error?
+	// log.Printf("Warning: Cannot find FuncDecl for %s\n", obj.FullName())
 }
 
 // stubTopLevelFuncs finds all the top-level functions and methods and stubs
-// them out.
-func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncDecl]string) {
+// them out. It also saves a pointer to the syntax tree of the function
+// literal, for later use.
+func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncDecl]string, _ RewriteMode) {
 	for _, file := range pkg.Syntax {
 		pre := func(c *astutil.Cursor) bool {
 			switch n := c.Node().(type) {
 			case *ast.FuncDecl:
 				if name, ok := funcs[n]; ok {
-					// log.Printf("Translating %s\n", name)
-
 					// Skip all init() functions.  (We don't need to skip
 					// main.main() because rewriting "main" is an error higher up.)
 					if name == "init" {
 						return false
 					}
 
-					newVar, setFunc := rewriteFunc(pkg.PkgPath, name, n)
-					// These are like a stack, so in the emitted source, the
-					// current func will come first, then newVar, then setFunc.
-					c.InsertAfter(setFunc)
-					c.InsertAfter(newVar)
+					// log.Printf("Translating %s\n", name)
 
-					// Track setFunc => newVar
-					if r.NewFunc[pkg.PkgPath] == nil {
-						r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
+					stubName, newVar, newInit, funcLit := rewriteFunc(name, n)
+					if newVar != nil {
+						c.InsertAfter(newInit)
+						c.InsertAfter(newVar)
+
+						// Track stubVar => new function
+						if r.NewFunc[pkg.PkgPath] == nil {
+							r.NewFunc[pkg.PkgPath] = map[string]*ast.FuncLit{}
+						}
+						// log.Printf("Storing %s: %s", pkg.PkgPath, stubPrefix+name)
+						r.NewFunc[pkg.PkgPath][stubName] = funcLit
 					}
-					// log.Printf("Storing %s:%s", pkg.PkgPath, setFunc.Name.Name)
-					r.NewFunc[pkg.PkgPath][setFunc.Name.Name] =
-						newVar.Specs[0].(*ast.ValueSpec).Values[0].(*ast.FuncLit)
 				}
 			}
 			return true
@@ -270,36 +426,44 @@ func (r *Rewriter) stubTopLevelFuncs(pkg *packages.Package, funcs map[*ast.FuncD
 }
 
 // Print prints the rewritten files to a tree rooted in the given path.
+//
+// Not currently used ... but does look handy?
 func (r *Rewriter) Print(root string) error {
 	for _, pkg := range r.Pkgs {
-		for i, file := range pkg.CompiledGoFiles {
-			// Print file.  Not sure how to map from file to the appropriate item
-			// in pkg.Syntax.  Maybe we'll get lucky and they're in the same
-			// order?
-			//
-			// This example code assumes that.
+		// Obviously fix this bit if we start using this function!
+		if len(pkg.CompiledGoFiles) != len(pkg.Syntax) {
+			panic("CompiledGoFiles does not match Syntax")
+		}
 
-			buf := bytes.Buffer{}
-			format.Node(&buf, pkg.Fset, pkg.Syntax[i])
+		for i, file := range pkg.CompiledGoFiles {
+			// Print file.
+			_, b, err := FormatNode(pkg.Fset, pkg.Syntax[i])
+			if err != nil {
+				return err
+			}
 			// FIXME: joining root and file this way may be wrong.  Not sure
 			// what's going to be in file at this point.  I think they're
 			// actually absolute paths, so this is definitely wrong.
-			ioutil.WriteFile(filepath.Join(root, file), buf.Bytes(), 0600)
+			os.WriteFile(filepath.Join(root, file), b, 0600)
 		}
 	}
 	return nil
 }
 
-// Updates node in place, and returns newVar and setFunc to be added to the
-// AST after node.
+// Updates node in place, and returns newVar, newInit, and the funcLit to be
+// added to the AST after node.
 //
 // We're doing AST generation so things get a little Lisp-y.
-func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.FuncDecl) {
+func rewriteFunc(name string, node *ast.FuncDecl) (string, *ast.GenDecl, *ast.FuncDecl, *ast.FuncLit) {
+	// Don't rewrite generic functions, i.e., functions with type parameters
+	if node.Type.TypeParams != nil {
+		return "", nil, nil, nil
+	}
+
 	newVarType := copyFuncType(node.Type)
 
 	var newArgs []ast.Expr
 
-	n := 0
 	recvrVarOffset := 0
 
 	// Process the receiver for a method definition
@@ -308,17 +472,16 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 		recvrVarOffset++
 
 		var receiverName string
-		if len(node.Recv.List[0].Names) == 0 {
-			// If the function has no receiver name, we have to generate one.
-			receiverName = fmt.Sprintf("%s%d", syntheticArgPrefix, n)
-			n++
+		if len(node.Recv.List[0].Names) == 0 || node.Recv.List[0].Names[0].Name == "_" {
+			// If the function has no receiver name, or it's "_", we have to generate one.
+			receiverName = syntheticReceiver
 			node.Recv.List[0].Names = []*ast.Ident{{Name: receiverName}}
 		} else {
 			receiverName = node.Recv.List[0].Names[0].Name
 		}
 
 		// Add receiver name to the front of the function call arglist
-		newArgs = append(newArgs, newIdent(receiverName))
+		newArgs = append(newArgs, &ast.Ident{Name: receiverName})
 
 		// prepend the receiver & type to the new function type
 		newVarType.Params.List = append(
@@ -347,12 +510,14 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 		}
 	}
 
-	// Copy all formal arguments into the arglist of the function call
+	// Copy all formal arguments into the arglist of the function call,
+	// replacing missing args and "_" args with synthetic arg names.
+	argN := 0
 	for i, argField := range node.Type.Params.List {
 		if len(argField.Names) == 0 {
-			newName := fmt.Sprintf("%s%d", syntheticArgPrefix, n)
-			n++
-			ident := newIdent(newName)
+			newName := fmt.Sprintf("%s%d", syntheticArgPrefix, argN)
+			argN++
+			ident := &ast.Ident{Name: newName}
 			argField.Names = []*ast.Ident{ident}
 			newArgs = append(newArgs, ident)
 
@@ -360,14 +525,22 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 			newVarType.Params.List[recvrVarOffset+i].Names = argField.Names
 		} else {
 			for _, argName := range argField.Names {
-				newArgs = append(newArgs, newIdent(argName.Name))
+				if argName.Name == "_" {
+					// Update the argname in place
+					argName.Name = fmt.Sprintf("%s%d", syntheticArgPrefix, argN)
+					// log.Printf("set argName to %s", argNameIdent.Name)
+				}
+				newArgs = append(newArgs, &ast.Ident{Name: argName.Name})
+				argN++
 			}
 		}
 	}
+	// log.Printf("rewriteFunc: %s: newArgs: %d, %v", name, len(newArgs), newArgs)
 
+	name = stubPrefix + name
 	// Define the new body of the function/method to just call the stub.
 	stubCall := &ast.CallExpr{
-		Fun:      newIdent(stubPrefix + name),
+		Fun:      &ast.Ident{Name: name},
 		Args:     newArgs,
 		Ellipsis: ellipsisPos,
 	}
@@ -389,51 +562,45 @@ func rewriteFunc(pkgPath, name string, node *ast.FuncDecl) (*ast.GenDecl, *ast.F
 					}}}}
 	}
 
-	// Define the stub with the new arglist, and old body from the
-	// function/method.
+	funcLit := &ast.FuncLit{
+		Type: newVarType,
+		Body: node.Body,
+	}
+
+	// Define the var stub with the new arglist
+	//
+	// var <name> <func-type>
 	newVar := &ast.GenDecl{
 		Tok: token.VAR,
 		Specs: []ast.Spec{
 			&ast.ValueSpec{
-				Names: []*ast.Ident{{Name: stubPrefix + name}},
-				Values: []ast.Expr{
-					&ast.FuncLit{
-						Type: newVarType,
-						Body: node.Body,
-					}}}}}
+				Names: []*ast.Ident{{Name: name}},
+				Type:  newVarType,
+			}}}
 
-	// Define the Set function
-	setFunc := &ast.FuncDecl{
-		Name: newIdent(setPrefix + name),
-		Type: &ast.FuncType{
-			Params: &ast.FieldList{
-				List: []*ast.Field{{
-					Names: []*ast.Ident{{Name: "f"}},
-					Type:  newVarType,
-				}}}},
+	// Assign the old body from the function/method to the stub var in an init
+	// function.
+	//
+	// func init() { <name> = <function-literal> }
+	newInit := &ast.FuncDecl{
+		Name: &ast.Ident{Name: "init"},
+		Type: &ast.FuncType{Params: &ast.FieldList{}},
 		Body: &ast.BlockStmt{
 			List: []ast.Stmt{
 				&ast.AssignStmt{
-					Lhs: []ast.Expr{newIdent(stubPrefix + name)},
+					Lhs: []ast.Expr{&ast.Ident{Name: name}},
 					Tok: token.ASSIGN,
-					Rhs: []ast.Expr{newIdent("f")},
-				}}}}
+					Rhs: []ast.Expr{funcLit}}}}}
 
 	// Replace the node's body with the new body in-place.
+	//
+	// func <real-name><signature> { <real-body> }
+	//
+	// =>
+	//
+	// func <real-name><signature> { <call-stub-var> }
 	node.Body = body
-	return newVar, setFunc
-}
-
-func newSelector(x, sel string) *ast.SelectorExpr {
-	return &ast.SelectorExpr{X: newIdent(x), Sel: newIdent(sel)}
-}
-
-func newIdent(name string) *ast.Ident {
-	return &ast.Ident{Name: name}
-}
-
-func newStringLit(s string) *ast.BasicLit {
-	return &ast.BasicLit{Kind: token.STRING, Value: fmt.Sprintf("%q", s)}
+	return name, newVar, newInit, funcLit
 }
 
 func copyFuncType(t *ast.FuncType) *ast.FuncType {
@@ -453,77 +620,70 @@ func copyFuncType(t *ast.FuncType) *ast.FuncType {
 	return &t2
 }
 
-func (r *Rewriter) LookupFile(targetFileName string) (*ast.File, *token.FileSet, error) {
+func (r *Rewriter) LookupFile(targetFileName string) *ast.File {
 	// log.Printf("LookupFile looking for %s", targetFileName)
 	for _, pkg := range r.Pkgs {
 		// log.Printf("LookupFile considering package %s", pkg.Name)
-		for _, file := range pkg.Syntax {
-			name := pkg.Fset.Position(file.Pos()).Filename
-			// log.Printf("LookupFile considering file %s", name)
-			if targetFileName == name {
-				return file, pkg.Fset, nil
-			}
+		if file := FileFromName(pkg, targetFileName); file != nil {
+			return file
 		}
 	}
-	return nil, nil, fmt.Errorf("File %s not found in parsed files", targetFileName)
+	return nil
 }
 
-func (r *Rewriter) FuncDef(pkgPath, setter string) (string, map[string]string, error) {
+type Poser interface {
+	Pos() token.Pos
+}
+
+func FileFromPos(pkg *packages.Package, p Poser) *ast.File {
+	return FileFromName(pkg, pkg.Fset.File(p.Pos()).Name())
+}
+
+func FileFromName(pkg *packages.Package, name string) *ast.File {
+	if len(pkg.CompiledGoFiles) == len(pkg.Syntax) {
+		// I think this is faster than the next bit. You can't do a binary search
+		// (i.e. sort.Search) because (so far as I can tell) CompiledGoFiles isn't
+		// sorted.
+		for i, cgFile := range pkg.CompiledGoFiles {
+			if cgFile == name {
+				return pkg.Syntax[i]
+			}
+		}
+		return nil
+	}
+	for _, file := range pkg.Syntax {
+		if name == pkg.Fset.File(file.Pos()).Name() {
+			return file
+		}
+	}
+	return nil
+}
+
+func (r *Rewriter) FuncDef(pkgPath, stubVar string) (string, error) {
+	pkg, node := r.FuncNode(pkgPath, stubVar)
+	if pkg == nil || node == nil {
+		return "", fmt.Errorf("No stubVar found for %s:%s", pkgPath, stubVar)
+	}
+	s, _, err := FormatNode(pkg.Fset, node)
+	return s, err
+}
+
+func (r *Rewriter) FuncNode(pkgPath, stubVar string) (*packages.Package, *ast.FuncLit) {
 	for _, pkg := range r.Pkgs {
 		if pkg.PkgPath != pkgPath {
 			continue
 		}
-		funcAst := r.NewFunc[pkgPath][setter]
-
-		// log.Printf("Setter %s ast\n", setter)
-		// ast.Print(pkg.Fset, funcAst)
-
-		// Find the file this function is in
-		fName := pkg.Fset.Position(funcAst.Pos()).Filename
-		file, _, err := r.LookupFile(fName)
-		if err != nil {
-			return "", nil, err
-		}
-
-		// Build a map of import names & paths that this file imports.
-		imports := map[string]string{}
-		usedImports := map[string]string{}
-		for _, imp := range file.Imports {
-			impPath := strings.Trim(imp.Path.Value, "\"")
-			name := path.Base(impPath)
-			if imp.Name != nil {
-				name = imp.Name.Name
-			}
-			imports[name] = impPath
-
-			// Mark all dot-imports as used.  Because we won't know, do we?
-			if name == "." {
-				usedImports["."] = impPath
-			}
-		}
-		// log.Printf("File %s imports %#v", fName, imports)
-
-		// Traverse the function's AST and find all SelectorExprs that look like
-		// package references.  FIXME: This will probably break if somebody
-		// shadows a package name (sigh).
-		pre := func(c *astutil.Cursor) bool {
-			switch n := c.Node().(type) {
-			case *ast.SelectorExpr:
-				if x, ok := n.X.(*ast.Ident); ok {
-					// log.Printf("Looking at selector %#v", x.Name)
-					if impPath, ok := imports[x.Name]; ok {
-						usedImports[x.Name] = impPath
-					}
-				}
-			}
-			return true
-		}
-		_ = astutil.Apply(funcAst, pre, nil)
-		// log.Printf("Setter %s uses %v", setter, usedImports)
-
-		b := &bytes.Buffer{}
-		format.Node(b, pkg.Fset, r.NewFunc[pkgPath][setter])
-		return b.String(), usedImports, nil
+		// log.Printf("NewFunc[%s][%s]", pkgPath, stubVar)
+		return pkg, r.NewFunc[pkgPath][stubVar]
 	}
-	return "", nil, fmt.Errorf("No setter found for %s:%s", pkgPath, setter)
+	return nil, nil
+}
+
+func FormatNode(fset *token.FileSet, node ast.Node) (string, []byte, error) {
+	b := &bytes.Buffer{}
+	err := format.Node(b, fset, node)
+	if err != nil {
+		return "", nil, err
+	}
+	return b.String(), b.Bytes(), nil
 }

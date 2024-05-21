@@ -12,10 +12,16 @@ import (
 )
 
 // Copy copies the entire filesystem described by src to the local filesystem
-// at the a path rooted at the string dest. Dest does not need to exist in
+// at the path rooted at the string dest. Dest does not need to exist in
 // advance. File permissions are not preserved by the copy.
+//
+// Skips .git and .*.sw? (Vim swap files).
 func Copy(dest string, src fs.FS) error {
-	walkFunc := func(path string, d fs.DirEntry, inErr error) (err error) {
+	walkFunc := func(path string, d fs.DirEntry, _ error) (retErr error) {
+		if shouldSkip(path) {
+			return nil
+		}
+
 		destPath := filepath.Join(dest, path)
 		if d.IsDir() {
 			info, err := d.Info()
@@ -33,8 +39,8 @@ func Copy(dest string, src fs.FS) error {
 		}
 		defer func() {
 			if e := newFile.Close(); e != nil {
-				if err == nil {
-					err = fmt.Errorf("failed finalizing %s: %w", destPath, e)
+				if retErr == nil {
+					retErr = fmt.Errorf("failed finalizing %s: %w", destPath, e)
 				}
 			}
 		}()
@@ -54,4 +60,26 @@ func Copy(dest string, src fs.FS) error {
 		return fmt.Errorf("failed walking source: %w", err)
 	}
 	return nil
+}
+
+// shouldSkip returns true for any path containing .git, or any path ending in
+// .sw?.
+func shouldSkip(f string) bool {
+	if len(f) > 4 && f[len(f)-4:len(f)-1] == ".sw" {
+		return true
+	}
+	var file string
+	for {
+		f, file = filepath.Split(f)
+		if f == "" {
+			break
+		}
+		if file == ".git" || f == ".git/" {
+			return true
+		}
+		if len(f) > 1 {
+			f = f[:len(f)-1]
+		}
+	}
+	return false
 }
