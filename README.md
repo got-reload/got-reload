@@ -207,13 +207,16 @@ got-reload run -d /tmp/got-reload -v -p <paths> <package-path>
 See Yaegi bugs:
 
 - https://github.com/traefik/yaegi/issues/1632
-  - Updating variables in reloaded code directly has some bugs. You can't
-    always just use `foo`, sometimes you have use `*&foo`.
+  - Updating variables in reloaded code has some problems. You can't always
+    just use `foo`, sometimes you have use `*&foo`.
 - https://github.com/traefik/yaegi/issues/1634
   - Interpreted closures mixed with "binary" functions don't capture for loop
     values correctly
 - https://github.com/traefik/yaegi/issues/1635.
   - Channel send on "binary" channel panics or errors (at compile-time) 
+
+And of course any other Yaegi bugs; those are just those that I've filed
+recently.
 
 ## Who came up with this harebrained idea?
 
