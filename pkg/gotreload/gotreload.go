@@ -15,6 +15,7 @@ import (
 
 	"github.com/got-reload/got-reload/pkg/extract"
 	"github.com/got-reload/got-reload/pkg/util"
+	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 )
@@ -34,10 +35,12 @@ const (
 
 type (
 	Rewriter struct {
+		// Where to write filtered Go code
 		OutputDir string
-		Pwd       string
-		Config    packages.Config
-		Pkgs      []*packages.Package
+		// Where to read source Go packages from
+		Pwd    string
+		Config packages.Config
+		Pkgs   []*packages.Package
 		// Keys are PkgPath & stubVar name.  We use PkgPath as the key instead
 		// of a *packages.Package because we need to be able to find this across
 		// different instances of Rewriter, where pointer values will be
@@ -686,4 +689,49 @@ func FormatNode(fset *token.FileSet, node ast.Node) (string, []byte, error) {
 		return "", nil, err
 	}
 	return b.String(), b.Bytes(), nil
+}
+
+// RewriteGoMod replaces relative paths in "replace" directives with absolute
+// paths.
+func (r *Rewriter) RewriteGoMod() error {
+	gomod := filepath.Join(r.Pwd, "go.mod")
+	if _, err := os.Stat(gomod); err != nil {
+		// No go.mod found
+		return nil
+	}
+
+	// Read the file
+	byts, err := os.ReadFile(gomod)
+	if err != nil {
+		return err
+	}
+
+	byts, err = r.rewriteGoMod(gomod, byts)
+	return os.WriteFile(filepath.Join(r.OutputDir, "go.mod"), byts, 0)
+}
+
+func (r *Rewriter) rewriteGoMod(gomod string, data []byte) ([]byte, error) {
+	// Parse the go.mod file
+	file, err := modfile.Parse(gomod, data, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update all "replace" directives that use relative paths with absolute
+	// paths.
+	for _, replace := range file.Replace {
+		if _, err := os.Stat(filepath.Join(r.Pwd, replace.New.Path)); err != nil {
+			// Not a file
+			continue
+		}
+		absPath, err := filepath.Abs(filepath.Join(r.Pwd, replace.New.Path))
+		if err != nil {
+			return nil, err
+		}
+		file.AddReplace(replace.Old.Path, replace.Old.Version,
+			absPath, replace.New.Version)
+	}
+
+	b, err := file.Format()
+	return b, err
 }

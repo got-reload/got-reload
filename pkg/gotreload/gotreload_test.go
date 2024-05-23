@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"testing"
@@ -657,6 +658,36 @@ func TestReloadParse(t *testing.T) {
 	// Do the subsequent parse
 	// Reinstall(?) the new function
 	// Verify the new function runs when called
+}
+
+func TestRewriteGoMod(t *testing.T) {
+	// Get the base directory of the project. (The $PWD when running a test is
+	// the directory the *_test.go file is in.)
+	pwd, err := os.Getwd()
+	require.NoError(t, err)
+	pwd = filepath.Clean(filepath.Join(pwd, "..", ".."))
+
+	r := NewRewriter()
+	r.Pwd = pwd
+	r.OutputDir = "/tmp/got-reload"
+
+	gomod := filepath.Join(r.Pwd, "go.mod")
+	byts, err := r.rewriteGoMod(gomod, []byte(`module github.com/got-reload/got-reload
+
+go 1.22.1
+
+replace github.com/traefik/yaegi => ../../traefik/yaegi
+
+require (
+	github.com/traefik/yaegi v0.16.2-0.20240430170404-381e045966b0
+)
+
+require (
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
+`))
+	require.NoError(t, err)
+	assert.Contains(t, string(byts), "replace github.com/traefik/yaegi => /")
 }
 
 var (

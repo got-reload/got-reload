@@ -114,7 +114,8 @@ func run(selfName string, args []string) {
 	set.StringVar(&useDir, "dir", "", "The directory to use instead of $TMPDIR/gotreload-*")
 	set.StringVar(&useDir, "d", "", "Short form of \"-dir\"")
 	set.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), `%[1]s
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, `%[1]s
 
 %[1]s [flags] <package> <cmd-args>
 
@@ -122,7 +123,7 @@ Flags:
 
 `, selfName)
 		set.PrintDefaults()
-		fmt.Fprintf(flag.CommandLine.Output(), `
+		fmt.Fprintf(out, `
 -dir/-d - If you specify this option, it's up to you to clean up the directory
 			 before each use. We are wary of running the equivalent of "rm -rf
 			 $dir/*" ourselves.
@@ -136,7 +137,7 @@ Flags:
 
 	packages := strings.Split(packagesCSV, ",")
 	if len(packages) < 1 {
-		log.Fatal("No hot-reload packages specified")
+		log.Fatal("No got-reload packages specified")
 	}
 
 	// This is either "got-reload" or whatever executable "go run" builds.  (I
@@ -156,7 +157,7 @@ Flags:
 
 	var workDir string
 	if useDir == "" {
-		workDir, err = os.MkdirTemp("", "gotreload-*")
+		workDir, err = os.MkdirTemp("", "got-reload-*")
 		if err != nil {
 			log.Fatalf("Unable to create work directory: %v", err)
 		}
@@ -303,6 +304,11 @@ func filter(selfName string, args []string) {
 	r := gotreload.NewRewriter()
 	r.OutputDir = outputDir
 	r.Pwd = pwd
+	err = r.RewriteGoMod()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	err = r.Load(packageList...)
 	if err != nil {
 		log.Fatalf("%v", err)

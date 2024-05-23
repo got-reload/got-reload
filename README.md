@@ -203,11 +203,6 @@ your source and save, the filtered code is not updated on-disk.
 
 ### Current practical limitations (things we might to be able to eventually work around)
 
-- `replace` directives in `go.mod` in the project you're reloading must use
-  absolute paths.
-
-  This is because we copy source of the project to a temporary directory, so
-  relative paths in `go.mod` don't work.
 - You cannot change function signatures.
 - You cannot redefine types (add/remove/change fields) or add new types.
 - You cannot add new package-scope variables or constants during a reload.
