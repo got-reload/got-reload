@@ -2,7 +2,6 @@ module github.com/got-reload/got-reload
 
 go 1.22.1
 
-// replace github.com/traefik/yaegi => /Users/lmc/goget/src/github.com/traefik/yaegi
 // replace github.com/traefik/yaegi => ../../traefik/yaegi
 
 require (

@@ -332,12 +332,6 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 
 		// log.Printf("Looking at %s: %s", pkgPath, stubVar)
 
-		// Get a string version of the old function definition
-		origDefStr, err := r.FuncDef(pkgPath, stubVar)
-		if err != nil {
-			log.Printf("Error getting function definition of %s:%s: %v", pkgPath, stubVar, err)
-			continue
-		}
 		// Get a string version of the new function definition
 		newDefStr, _, err := gotreload.FormatNode(newPkg.Fset, funcLit)
 		if err != nil {
@@ -345,13 +339,25 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 			continue
 		}
 
-		if origDefStr == newDefStr {
-			continue
+		status := "is new"
+		if hasPragma(newDefStr, "ForceReload") {
+			status = "forced reload"
+		} else {
+			// Get a string version of the old function definition
+			origDefStr, err := r.FuncDef(pkgPath, stubVar)
+			if err != nil {
+				log.Printf("Error getting function definition of %s:%s: %v", pkgPath, stubVar, err)
+				continue
+			}
+
+			if origDefStr == newDefStr {
+				continue
+			}
 		}
 
 		updatedFound = true
 
-		log.Printf("%s is new", stubVar)
+		log.Printf("%s %s", stubVar, status)
 
 		// Get the named imports (if any) from the changed file
 		changedFile := gotreload.FileFromPos(newPkg, funcLit)
@@ -403,14 +409,16 @@ func main() {
 
 		var r any
 		panicked := false
-		// Catch Yaegi panics
+		// Catch Yaegi panics, maybe
 		func() {
-			defer func() {
-				if r = recover(); r != nil {
-					err = fmt.Errorf("Eval panicked: %v", r)
-					panicked = true
-				}
-			}()
+			if !hasPragma(newDefStr, "NoCatchPanic") {
+				defer func() {
+					if r = recover(); r != nil {
+						err = fmt.Errorf("Eval panicked: %v", r)
+						panicked = true
+					}
+				}()
+			}
 
 			_, err = i.Eval(mainFunc)
 		}()
@@ -428,6 +436,12 @@ func main() {
 
 		if err == nil {
 			log.Printf("Ran %s", stubVar)
+
+			if hasPragma(newDefStr, "PrintMe") {
+				for i, line := range strings.Split(mainFunc, "\n") {
+					log.Printf("%d: %s", i+1, line)
+				}
+			}
 		} else {
 			errStr := err.Error()
 			log.Printf("Eval error: %s", errStr)
@@ -463,6 +477,10 @@ func main() {
 	r.NewFunc[pkgPath] = newR.NewFunc[pkgPath]
 
 	return nil
+}
+
+func hasPragma(s, pragma string) bool {
+	return strings.Contains(s, fmt.Sprintf("pragma.%s()\n", pragma))
 }
 
 func getInterp() (*interp.Interpreter, error) {
