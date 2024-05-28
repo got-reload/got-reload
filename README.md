@@ -229,7 +229,12 @@ See Yaegi bugs:
   - Interpreted closures mixed with "binary" functions don't capture for loop
     values correctly
 - https://github.com/traefik/yaegi/issues/1635.
-  - Channel send on "binary" channel panics or errors (at compile-time) 
+  - Channel send on "binary" channel panics or errors (at compile-time)
+- https://github.com/traefik/yaegi/issues/1637
+  - The collision resolution mechanism in ImportUsed is insufficient when
+    importing > 2 packages with the same base name
+  - Can result in "package foo \<path\> has no symbol Bar" errors, when foo.Bar most
+    definitely exists.
 
 And of course any other Yaegi bugs; those are just those that I've filed
 recently.
