@@ -29,3 +29,6 @@ func ForceReload() {}
 // call. This is handy to get a stack trace that shows exactly where the
 // interpreter is panicking (if it panics).
 func NoCatchPanic() {}
+
+// SkipMe tells got-reload to ignore the function containing this pragma.
+func SkipMe() {}

@@ -353,6 +353,12 @@ func processSingleChange(r, newR *gotreload.Rewriter, changed map[string]bool) e
 			if origDefStr == newDefStr {
 				continue
 			}
+
+			if hasPragma(newDefStr, "SkipMe") {
+				updatedFound = true
+				log.Printf("%s skipped", stubVar)
+				continue
+			}
 		}
 
 		updatedFound = true
