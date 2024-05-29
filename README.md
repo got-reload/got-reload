@@ -4,12 +4,12 @@ Function-level stateful hot reloading for Go!
 
 # Status
 
-Beta. A work in progress. Might work for you in your project, might not. The
-Yaegi bugs listed below definitely make things awkward. Not recommended for
-production use.
+Beta. Might work in your project, might not. The Yaegi bugs listed below
+definitely make things awkward. Doesn't work with generic functions/methods. Not
+recommended for production use.
 
-That said, it's pretty neat when it does work, especially on GUI code where
-you're tweaking widget sizes or positions or order.
+All that said, it's pretty neat when it does work, especially on GUI code where
+you can see the results immediately.
 
 # How it works
 
@@ -269,7 +269,7 @@ See Yaegi bugs:
   - Updating variables in reloaded code has some problems. You can't always just
     use `foo`, sometimes you have use `*&foo`.
 - https://github.com/traefik/yaegi/issues/1634
-  - Interpreted closures mixed with "binary" functions don't capture for loop
+  - Interpreted closures mixed with "binary" functions don't capture closed-over
     values correctly
 - https://github.com/traefik/yaegi/issues/1635.
   - Channel send on "binary" channel panics or errors (at compile-time)
@@ -281,6 +281,10 @@ See Yaegi bugs:
 
 And of course any other Yaegi bugs; those are just those that I've filed
 recently.
+
+Note that not all of these bugs cause the interpreter to throw errors or panic,
+sometimes it just behaves incorrectly. See especially the first two, 1632 and
+1634. These are what make got-reload "not recommended for production use".
 
 # Who came up with this harebrained idea?
 
