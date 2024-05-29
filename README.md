@@ -2,21 +2,143 @@
 
 Function-level stateful hot reloading for Go!
 
-## Status
+# Status
 
 Beta. A work in progress. Might work for you in your project, might not. The
-Yaegi bugs listed below definitely make things awkward.
+Yaegi bugs listed below definitely make things awkward. Not recommended for
+production use.
 
 That said, it's pretty neat when it does work, especially on GUI code where
 you're tweaking widget sizes or positions or order.
 
-## Do you have a demo?
+# How it works
+
+## Rewrite each function/method
+
+Got-reload copies everything in your project tree (the current directory when
+you run got-reload) to a temporary directory (something under `$TMPDIR`, or
+specified as an argument to `got-reload run`), and along the way alters each
+function and method body in your code so that it indirects via a variable. This
+allows it to redefine the implementation of functions/methods at runtime, by
+assigning a new closure to that variable, via
+[Yaegi](https://github.com/traefik/yaegi), a Go interpreter.
+
+The filter will transparently change functions and variables from this
+
+```go
+var (
+	f = new(float64)
+)
+
+func F1() int {
+	*f += 0.1
+	fmt.Printf("f: %0.3f, sin %0.3f\n", *f, example2.Sin(*f))
+	return 1
+}
+```
+
+into this
+
+```go
+var (
+	GRLx_f = new(float64)
+)
+
+func F1() int { return GRLfvar_F1() }
+
+var GRLfvar_F1 func() int
+
+func init() {
+	GRLfvar_F1 = func() int {
+		*GRLx_f += 0.1
+		fmt.Printf("f: %0.3f, sin %0.3f\n", *GRLx_f, example2.Sin(*GRLx_f))
+		return 1
+	}
+}
+```
+
+and similarly for methods.
+
+## Export everything that wasn't already
+
+As seen in the example code above, got-reload exports all unexported
+package-level identifiers (variables, types, field names of package-level
+structs) by adding "GRLx_" to the front of the identifier names. (This is
+because all interpreted Yaegi code runs from package `main`, and so can only
+access exported identifiers).
+
+(As mentioned above, none of this is done in-place, it's all performed on a
+temporary copy of the packages being filtered. No original source code is
+changed.)
+
+## Watch your source for changes at runtime
+
+When a source file in a watched package changes, it is reread, and changed
+functions will be installed with new versions of themselves via the generated
+`GRLfvar_*` variables, via Yaegi.
+
+That replacement looks something like this:
+
+```go
+GRLfvar_F1 = func() int {
+	*GRLx_f += 0.2 // note change here
+	fmt.Printf("f: %0.3f, sin %0.3f\n", *GRLx_f, example2.Sin(*GRLx_f))
+	return 1
+}
+```
+
+# Can I see the rewritten code?
+
+Yes, with some limitations. For the initial filtered code, check the first line
+of output from `got-reload run` to get the temporary directory used:
+
+```console
+main.go:172: copying [...]/github.com/got-reload/demo to /var/folders/9d/vt3kqx293xx8w3tn8m1jy_wc0000gn/T/gotreload-3376983803
+```
+
+Check the path mentioned after "to". (It's a subdir of `$TMPDIR`.)
+
+You can also give `got-reload run` a directory via the `-d` argument. (If you
+use this more than once, it's up to you to clean up the directory between runs.)
+I frequently run like this:
+
+```sh
+rm -rf /tmp/got-reload/* /tmp/got-reload/.* && 
+got-reload run -d /tmp/got-reload -v -p <paths> <package-path>
+```
+
+Note that the given directory is written once, used as a target for `go run` to
+run the filtered code, and not updated thereafter. In other words, if you change
+your source and save, the filtered code is not updated on-disk.
+
+There are also "pragmas" you can add to a function to alter the behavior of
+got-reload, including printing filtered code; see below.
+
+# Altering the behavior of got-reload at run-time via pragmas
+
+You can add calls to functions in
+[pkg/pragma](https://github.com/got-reload/got-reload/tree/main/pkg/pragma) to
+your code to alter the behavior of got-reload. These functions don't actually do
+anything, they're just stubs; got-reload checks for the existence of the
+function-call in your source code via a simple call to `strings.Contains` and
+alters its behavior accordingly.
+
+As of this writing, there are four pragmas: PrintMe, SkipMe, ForceReload, and
+NoCatchPanic.
+
+The PrintMe pragma will make got-reload print the filtered function whenever it
+changes. Check the godoc in the `pragma` package for the other pragmas.
+
+# Do you have a demo?
 
 Yes.
 
-The first is strictly terminal-based, the second is a small GioUI GUI program.
+The first is strictly terminal-based, the second is a small Gio-UI GUI program.
 
-### Terminal-based demo
+## Terminal-based demo
+
+See the demo repo readme for code samples (input, filtered output, replacement
+code, logs from a sample run): https://github.com/got-reload/demo.
 
 - Install got-reload:
 
@@ -86,9 +208,10 @@ Note how the package-level variable's state was not reset by the reload.
 
 Enter "s" to stop.
 
-### GUI-based demo
+## GUI-based demo
 
-Clone github.com/git-reload/giodemo and run `got-reload run`:
+Clone github.com/git-reload/giodemo and run `got-reload run` (this assumes
+you've installed got-reload already, as outlined in the above steps):
 
 ```sh
 cd $GOPATH/src/github.com/got-reload # or some appropriate path
@@ -101,107 +224,27 @@ Try altering the layout function defined in `giodemo/reloadable/reloadable.go`.
 See the comments in the file for ideas. Some familiarity with Gio is useful
 here.
 
-## Inspiration
+# Inspiration
 
 See this video that Chris did for something similar:
 
 https://user-images.githubusercontent.com/2324697/106301108-4e2fce80-6225-11eb-8038-1d726b3eb269.mp4
 
-## How it works
+# Limitations
 
-### Rewrite each function/method
-
-Got-reload copies your project to a temporary directory (something under
-`$TMPDIR`, or specified as an argument to `got-reload run`), and along the way
-alters each function and method body in your code so that it invokes a
-package-level function variable. This allows it to redefine the implementation
-of your functions/methods at runtime.
-
-The filter will transparently change functions from this
-
-```go
-func Foo(... args ...) (...return values...) {
-  // body
-}
-```
-
-into this
-
-```go
-func Foo(... args ...) (...return values...) {
-  return GRLfvar_Foo(...args...)
-}
-
-var GRLfvar_Foo func(...args...) (...return values...)
-
-func init() {
-  GRLfvar_Foo = func(...args...) (...return values...) {
-    // body
-  }
-}
-```
-
-and similarly for methods.
-
-### Export everything that wasn't already
-
-Got-reload exports all unexported package-level identifiers (variables, types,
-field names of package-level structs) by adding "GRLx_" to the front of the
-identifier names. (This is because all interpreted
-[Yaegi](https://github.com/traefik/yaegi) code runs from package `main`, and so
-can only access exported identifiers).
-
-(As mentioned above, none of this is done in-place, it's all performed on a
-temporary copy of the packages being filtered. No original source code is
-changed.)
-
-### Watch your source for changes at runtime
-
-When a filtered source file changes, it is read and parsed, and changed
-functions will be installed with new versions of themselves via the generated
-`GRLfvar_*` variables, via [Yaegi](https://github.com/traefik/yaegi), a Go
-interpreter.
-
-## Can I see the rewritten code?
-
-Yes, but only the initial version. The first line of output from `got-reload
-run` looks something like this:
-
-```
-main.go:172: copying [...]/github.com/got-reload/demo to /var/folders/9d/vt3kqx293xx8w3tn8m1jy_wc0000gn/T/gotreload-3376983803
-```
-
-Check the path mentioned after "to". (It's a subdir of `$TMPDIR`.)
-
-You can also give `got-reload run` a directory via the `-d` argument. (If you
-use this more than once, it's up to you to clean up the directory between runs.)
-I frequently run like this:
-
-```sh
-rm -rf /tmp/got-reload/* /tmp/got-reload/.* && 
-got-reload run -d /tmp/got-reload -v -p <paths> <package-path>
-```
-
-Note that the given directory is written once, used as a target for `go run` to
-run the filtered code, and not updated thereafter. In other words, if you change
-your source and save, the filtered code is not updated on-disk.
-
-## Limitations
-
-### Fundamental limitations
+## Fundamental limitations
  
 - Does not support reloading packages that directly reference CGO symbols. You
   can still depend on packages that use CGO, just don't use any `C.foo` symbols
   in your reloadable code.
-- Cannot redefine functions that never return. If your whole program runs an
-  event loop that iterates indefinitely over some channels, the new definition
-  of that event loop function will never be invoked because the old one never
-  returned.
+- Cannot redefine functions that never return. If your program has an event loop
+  that runs forever, the new definition of that event loop function will never
+  be invoked because the old one never returns.
 - Cannot redefine `main` or `init` functions (even if you could, it would have
   no effect. Your program has already started, so these functions have already
   executed.)
 
-### Current practical limitations (things we might to be able to eventually work around)
+## Current practical limitations (things we might to be able to eventually work around)
 
 - You cannot change function signatures.
 - You cannot redefine types (add/remove/change fields) or add new types.
@@ -209,16 +252,16 @@ your source and save, the filtered code is not updated on-disk.
 - You cannot gain new module dependencies during a reload.
 
   That said, you *can* import any package that your module *already* imports
-  transitively. So if X imports Y and you only import X, then you can later
-  import Y without issue. You can also import any package in the standard
-  library, which is already built-in to Yaegi.
+  transitively. So if X imports Y and you only directly import X, then you can
+  later directly import Y without issue. You can also import any package in the
+  standard library, which is already built-in to Yaegi.
 - You cannot reload any symbols in the `main` package. You can work around this
   by just copying your current `main` code to a different package, e.g.
   `grl_main`, exporting `main` as `Main`, and rewriting your real `main` to just
   call `grl_main.Main()`. Eventually we may teach the filter how to do this for
   you. ([Issue 5](https://github.com/got-reload/got-reload/issues/5))
 
-### Known bugs
+## Known bugs
 
 See Yaegi bugs:
 
@@ -239,7 +282,7 @@ See Yaegi bugs:
 And of course any other Yaegi bugs; those are just those that I've filed
 recently.
 
-## Who came up with this harebrained idea?
+# Who came up with this harebrained idea?
 
 - Larry Clapp [@theclapp](https://github.com/theclapp) 
 - Chris Waldon [@whereswaldon](https://github.com/whereswaldon)
@@ -248,14 +291,19 @@ Given that Yaegi's been out for a while, and Go's parsing tools have been out
 since the beginning (well, a lot of them, anyway), we both wonder why nobody has
 done this yet, to be honest.
 
-## Can I use it now?
+# Can I use it now?
 
 You can absolutely give it a shot. It works in the demos, and on some functions
 in a larger app, but fails in some cases (either the interpreter throws an error
 or panics outright). See above under "known bugs". It's possible for it to work
 on some functions but not others in the same file. If it works, it's great. :)
 
-## Can I support the development of this tool?
+# Should I use it for production code?
+
+Probably not. got-reload is currently intended only as an aid during
+development.
+
+# Can I support the development of this tool?
 
 Yes! We appreciate stars, watchers, feedback, and, of course, pull requests! A
 PR need not necessarily be code, of course; it could be documentation, or
